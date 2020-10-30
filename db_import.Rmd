@@ -1,0 +1,119 @@
+---
+title: "Data import to insect_monitoring database 2020"
+author: "Jens Å"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  NinaR::jensAnalysis:
+    highlight: tango
+    fig_caption: yes
+    toc: yes
+---
+
+
+```{r, include = F}
+#Some common packages, loading rmarkdown doesn't like the messages from tidyverse, so we don't include this in the document'
+require(tidyverse)
+require(DBI)
+require(RPostgres)
+require(ggplot2)
+require(xtable)
+require(NinaR)
+require(sf)
+```
+
+
+```{r setup, include=FALSE}
+#This is optional
+#I choose the 'styler' package for tidying the code to preserve indentations
+#I set the cutoff for code tidying to 60, but this doesn't currently work with styler.
+#Set tidy = True to get the knitr default
+#I want all figures as png and pdf in high quality in a subfolder called figure 
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      tidy = "styler",
+                      dev = c("png", "pdf"),
+                      dpi = 600,
+                      fig.path = "figure/",
+                      tidy.opts = list(width.cutoff = 60)
+                      )
+
+options(xtable.comment = F, 
+        xtable.include.rownames = F, 
+        nina.logo.y.pos = 0.15)
+palette(ninaPalette())
+```
+
+
+
+```{r, include = F, eval = T}
+source("~/.rpgpass")
+#This connects to the gisdatabase with a DBI connection named `con`.
+#Use for example dbGetQuery(con, "SELECT * FROM ....") to query the database
+dbConnect(PostgreSQL(), 
+                 dbname = "insect_monitoring",
+                 host = "ninradardata01.nina.no",
+                 user = username,
+                 password = password
+                 )
+
+rm(username, password)
+```
+
+Intro
+=========
+I'll try to collect most of the data import to the database in 2020 here.
+
+
+Trap locations
+=========
+```{r}
+trap_loc <- read_delim("../../Data/trap_locations/all_trap_locations_2020.csv",
+                     delim = ";")
+
+trap_loc <- trap_loc %>% 
+  mutate(year = 2020,
+         elev_data = ifelse(is.na(elev), FALSE, TRUE)) %>% 
+  mutate(elev = ifelse(is.na(elev), 0, elev)) %>% 
+           st_as_sf(coords = c("lon", "lat", "elev"),
+                    crs = 25833) %>% 
+  mutate(geom = geometry) %>% 
+  st_sf(sf_column_name = "geom") %>% 
+  select(-geometry)
+
+
+```
+```{r}
+
+dbSendQuery(con, "DROP TABLE IF EXISTS traps.trap_locations;")
+
+create_trap_loc_q <- "
+CREATE TABLE traps.trap_locations (
+id serial PRIMARY KEY,
+location text NOT NULL,
+year integer NOT NULL,
+trap text NOT NULL,
+gps_type text NOT NULL,
+elev_data BOOLEAN NOT NULL,
+geom Geometry(Pointz, 25833)
+)
+
+"
+
+dbSendQuery(con, create_trap_loc_q)
+
+```
+
+```{r}
+conn = dbConnect(PostgreSQL(), 
+                 dbname = "insect_monitoring",
+                 host = "ninradardata01.nina.no",
+                 user = username,
+                 password = password
+                 )
+
+
+dbSendQuery(con, "CREATE INDEX ON traps.trap_locations USING GIST(geom);")
+```
+
+
+
