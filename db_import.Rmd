@@ -10,15 +10,27 @@ output:
 ---
 
 
+**Todo**
+
+* Fix species names
+ - get rid of fa_, pa_ etc,
+ - split norwegian and latin into separate columns
+ - fix my manually entered names into correct latin names
+
+* Add landskogstaksering
+ 
 ```{r, include = F}
 #Some common packages, loading rmarkdown doesn't like the messages from tidyverse, so we don't include this in the document'
 require(tidyverse)
 require(DBI)
 require(RPostgres)
+require(RPostgreSQL)
 require(ggplot2)
 require(xtable)
 require(NinaR)
 require(sf)
+require(openxlsx)
+require(dbplyr)
 ```
 
 
@@ -49,7 +61,8 @@ palette(ninaPalette())
 source("~/.rpgpass")
 #This connects to the gisdatabase with a DBI connection named `con`.
 #Use for example dbGetQuery(con, "SELECT * FROM ....") to query the database
-dbConnect(PostgreSQL(), 
+dbDisconnect(con)
+con <- dbConnect(Postgres(), 
                  dbname = "insect_monitoring",
                  host = "ninradardata01.nina.no",
                  user = username,
@@ -104,16 +117,1600 @@ dbSendQuery(con, create_trap_loc_q)
 ```
 
 ```{r}
-conn = dbConnect(PostgreSQL(), 
-                 dbname = "insect_monitoring",
-                 host = "ninradardata01.nina.no",
-                 user = username,
-                 password = password
-                 )
-
 
 dbSendQuery(con, "CREATE INDEX ON traps.trap_locations USING GIST(geom);")
 ```
+
+
+Quick plot of the traps
+========
+Here we make a simple plot of just one location.
+
+```{r}
+traps_2020 <- read_sf(con, c("traps", "trap_locations"))
+
+```
+
+```{r skog_2_traps}
+traps_2020 %>% 
+  filter(location == "Skog_4") %>% 
+ggplot(.) +
+  geom_sf(aes(color = gps_type)) + 
+  scale_color_nina(name = "GPS-type") +
+ geom_sf_label(aes(label = trap),
+               nudge_x = 2,
+               nudge_y = 2) +
+  coord_sf(datum = sf::st_crs(25833)) +
+  labs(caption = "\U00a9 OpenStreetMap contributors")
+```
+
+
+Import ANO records
+========
+We got an export from the ANO-database of the Environmental agency, of the registered data for our survey locations in 2020. These are the 10 forest sites, that were surveyed by a separate project. I've punched the data we collected for the Semi-natural grasslands in the same format. These sites only contain records from one of the 18 ANO circles in the location though.
+
+Here I will create database tables to suit the data and import the records.
+
+
+
+```{r}
+md_ano_points <- read.xlsx("../../Data/ANO_eksport_MD/ANO_ekspot_excel.xlsx", 
+                           detectDates = T,
+                           sheet = 1) %>% 
+  mutate(Registeringsdato = convertToDate(Registeringsdato, origin = "1899-12-30"),
+         CreationDate = convertToDateTime(CreationDate, origin = "1899-12-30 00:00"),
+         EditDate = convertToDateTime(EditDate, origin = "1899-12-30 00:00")) %>% 
+  as_tibble()
+```
+
+Check data format
+
+```{r}
+md_ano_points %>% 
+  print(n = 1,
+        width = Inf)
+
+```
+
+We need to change some column names to fit PostgreSQL. No capital letters and dots.
+
+```{r}
+old_names <- names(md_ano_points)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="tilstedeværelse_av_naturtype_etter_miljødirektoratets_instruks"] <- "tilstedeværelse_av_naturtype_etter_miljødirektoratets_instruk"
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+
+new_names
+```
+```{r}
+names(md_ano_points) <- new_names
+```
+
+There is an error in the ano_flate_id for the locations with four digit numbers. They are called AN01234 instead of ANO1234. 
+
+```{r}
+md_ano_points <- md_ano_points %>% 
+  mutate(ano_flate_id = gsub("(AN0)(.*)", "ANO\\2", ano_flate_id)) 
+
+```
+
+Lengdegrad and breddegrad contains the same info, should be lat, lon. Also, we don't need the row numbers or the column with instructions for the right hand columns. Lastly, we don't need the "Arter registrert" because this will be added in the herb_species table later.
+
+```{r}
+md_ano_points <- md_ano_points %>% 
+  select(-c(her_skal_dekning_av_ano_variabler_på_250_m2_registeres__visuell_estimering_,
+            objectid,
+            breddegrad,
+            lengdegrad,
+            arter_registrert)) %>% 
+  mutate(x = ifelse(x == 0, NA, x),
+         y = ifelse(y == 0, NA, y))
+```
+
+```{r, eval = F}
+dbSendQuery(con, "CREATE SCHEMA IF NOT EXISTS ano;")
+"
+
+dbSendStatement(con, "
+GRANT ALL ON SCHEMA ano TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA ano TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA ano TO ag_pgsql_radardata_rw;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA ano
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA ano
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA ano
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;")
+
+```
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.survey_points CASCADE;")
+
+create_ano_point_Q <- "
+CREATE TABLE ano.survey_points (
+global_id UUID PRIMARY KEY,
+registeringsdato date,
+klokkeslett_start time(0),
+værforhold text,
+ano_flate_id text,
+ano_punkt_id int,
+hovedøkosystem_sirkel_250m2 text,
+andel_prc_av_sirkel_250m2_i_hovedøkosystemet double precision,
+er_punktet_utilgjengelig text,
+begrunnelse text,
+hvilken_type_gps_brukes text,
+nøyaktighet text,
+kartleggingsenhet_15000_senterpunkt text,
+hovedtype_1m2 text,
+ke_beskrivelse_1m2 text,
+kartleggingsenhet_15000_i_250m2_sirkel_den_vanligste text,
+hovedtype_250m2 text,
+ke_beskrivelse_250m2 text,
+andel_prc_av_sirkel_250m2_med_denne_kartleggingsenheten double precision,
+grøftingsintensitet_7gr_gi text,
+aktuell_bruksintensitet_7jb_ba text,
+beitetrykk_7jb_bt text,
+slåtteintensitet_7jb_si text,
+spor_etter_ferdsel_med_tunge_kjøretøy_7tk text,
+spor_etter_slitasje_og_slitasjebetinget_erosjon_7se text,
+tilstedeværelse_av_naturtype_etter_miljødirektoratets_instruk text,
+velg_naturtype text,
+kommentar_knyttet_til_naturtyperegistreringene text,
+total_dekning_prc_av_karplanter_registert double precision,
+dekning_prc_av_karplanter_i_feltsjikt double precision,
+dekning_prc_av_moser double precision,
+dekning_prc_av_torvmoser double precision,
+dekning_prc_av_lav double precision,
+dekning_prc_av_strø double precision,
+dekning_prc_av_bar_jord_grus_stein_berg double precision,
+dekning_prc_av_alger_crust double precision,
+kommentar_knyttet_til_registreringene_i_ruten_1m2 text,
+er_det_satt_ned_fastmerker text,
+kommentar_om_merkingen_av_ruten text,
+samlet_dekning_prc_av_krypende_vier double precision,
+samlet_dekning_prc_av_ikke_krypende_vier double precision,
+total_dekning_prc_av_vedplanter_i_feltsjikt double precision,
+dekning_prc_av_busker_i_busksjikt double precision,
+dekning_prc_av_tresjikt double precision,
+dekning_prc_av_død_skadet_røsslyng double precision,
+med_eller_uten_røsslyngblad text,
+dekning_prc_av_problemarter double precision,
+total_dekning_prc_av_fremmede_arter double precision,
+kommentar_knyttet_til_registreringene_på_250_m2_sirkel text,
+klokkeslett_slutt time(0),
+creation_date timestamp,
+creator text,
+edit_date timestamp,
+editor text,
+x double precision,
+y double precision,
+geom_punched Geometry(Point, 25833))
+;
+"
+
+dbSendStatement(con, create_ano_point_Q)
+
+dbSendStatement(con, "CREATE INDEX ON ano.survey_points USING BTREE(global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.survey_points USING BTREE(ano_flate_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.survey_points USING BTREE(ano_punkt_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.survey_points USING GIST(geom_punched);")
+
+
+
+geom_trg_fn <- "
+CREATE OR REPLACE FUNCTION fn_create_geom_from_xy() RETURNS trigger AS $fn_create_geom_from_xy$
+  BEGIN  
+	NEW.geom_punched = ST_Transform(ST_SetSRID(ST_MakePoint(NEW.x, NEW.y), 4326), 25833);
+  RETURN NEW;
+  END;
+$fn_create_geom_from_xy$ LANGUAGE plpgsql;
+"
+
+geom_tr <- "
+CREATE TRIGGER tr_test_table_inserted
+  BEFORE INSERT OR UPDATE ON ano.survey_points
+  FOR EACH ROW
+  EXECUTE PROCEDURE fn_create_geom_from_xy();"
+
+dbSendStatement(con, geom_trg_fn)
+
+dbSendStatement(con, "DROP TRIGGER IF EXISTS tr_test_table_inserted ON ano.survey_points;")
+dbSendStatement(con, geom_tr)
+
+
+
+```
+
+
+```{r, eval = F}
+dbSendStatement(con, "DELETE FROM ano.survey_points;")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "survey_points"),
+             md_ano_points,
+             append = T)
+```
+
+
+Create reference table of 18 ANO points in all potential ANO squares
+===================
+Quite alot of the ANO-data is missing coordinates. Assuming they are located at the theoretical locations of the ANO survey plan, we can infer the positions from there. We need to add a reference table of all potential ANO-squares, and compute the 18 survey points within each location.
+
+Read in all 10000 potential ANO sites
+---------
+
+```{r}
+ano_10000 <- read_sf("../../Data/AKO_sample/AKO-sample-10000-pol.shp",
+                     crs = 25833)
+
+ano_10000 <- ano_10000 %>% 
+  mutate(anoid = gsub("(AKO)(.*)", "ANO\\2", akoid)) %>% 
+  select(ssbid,
+         anonum = akonum,
+         anoid) %>% 
+    rename(geom = geometry)
+
+ano_10000
+```
+
+```{r}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.ano_10000;")
+
+create_ano_q <- "
+CREATE TABLE ano.ano_10000 (
+ssbid bigint PRIMARY KEY,
+anonum int,
+anoid text,
+geom Geometry(Polygon, 25833)
+)
+"
+dbSendStatement(con, create_ano_q)
+
+st_write(dsn = con,
+         layer = Id(schema = "ano", table = "ano_10000"),
+         obj = ano_10000,
+         append = T)
+
+```
+
+```{r}
+dbSendStatement(con, "CREATE INDEX ON ano.ano_10000 USING Gist(geom);")
+dbSendStatement(con, "CREATE INDEX ON ano.ano_10000 USING BTREE(anonum);")
+dbSendStatement(con, "CREATE INDEX ON ano.ano_10000 USING BTREE(anoid);")
+
+```
+
+Add table with ANO point offsets. This has a logic to it, got the recipee from Vegard B I think.
+
+```{r}
+ano_offsets <- read_csv("../../GIS/Feltlok_2020/ANO/AKO_punkt_offset/ako_point_offset.csv") %>% 
+  as_tibble()
+ano_offsets
+```
+```{r}
+create_ano_offset <- "
+CREATE TABLE ano.point_offsets (
+id UUID PRIMARY KEY,
+x int,
+y int,
+ano_point_name int);
+"
+
+dbSendStatement(con,
+                create_ano_offset)
+
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.point_offsets;")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "point_offsets"),
+             ano_offsets,
+             append = T)
+```
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.ano_18_points;")
+
+create_ano_points <- "
+CREATE TABLE ano.ano_18_points as (
+SELECT gen_random_uuid() as id, anoid as ano_id, ano_point_name as ano_point_id, st_setsrid(st_makepoint(offset_x, offset_y), 25833)::Geometry(Point, 25833) as geom
+FROM 
+(SELECT startpoint.x + o.x as offset_x, startpoint.y + o.y as offset_y, anoid, ano_point_name
+FROM  ano.point_offsets o,
+(SELECT ssbid, anoid, min(x) x, min(y) y
+FROM (
+SELECT ssbid, anoid, ST_x((st_dumppoints(ST_Extent(s.geom))).geom) as x, 
+ST_Y((st_dumppoints(ST_Extent(s.geom))).geom) as y
+FROM ano.ano_10000 s
+GROUP BY ssbid
+ ) foo
+ GROUP BY foo.ssbid, foo.anoid) as startpoint) points
+) 
+"
+
+dbSendStatement(con,
+                create_ano_points)
+
+```
+```{r}
+dbSendStatement(con, "CREATE INDEX ON ano.ano_18_points USING BTREE(ano_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.ano_18_points USING BTREE(ano_point_id);")
+
+```
+
+Add inferred geometry to ANO-table.
+
+```{r}
+add_ano_point_geom <- "
+ALTER TABLE ano.survey_points 
+ADD COLUMN geom_inferred Geometry(Point, 25833);
+"
+dbSendStatement(con, add_ano_point_geom)
+
+```
+
+```{r}
+add_inf_geoms <- "
+UPDATE ano.survey_points s
+SET geom_inferred = p.geom
+FROM ano.ano_18_points p
+WHERE s.ano_flate_id = p.ano_id
+AND s.ano_punkt_id = p.ano_point_id
+"
+
+dbSendStatement(con, add_inf_geoms)
+
+```
+
+Add the ANO registered plant species
+---------
+
+
+```{r}
+md_ano_species <- read.xlsx("../../Data/ANO_eksport_MD/ANO_ekspot_excel.xlsx", 
+                           detectDates = T,
+                           sheet = 2) %>% 
+  mutate(CreationDate = convertToDateTime(CreationDate, origin = "1899-12-30 00:00"),
+         EditDate = convertToDateTime(EditDate, origin = "1899-12-30 00:00")) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(md_ano_species)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(md_ano_species) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+md_ano_species <- md_ano_species %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         dekning_prc,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.herb_species;")
+
+create_ano_species_Q <- "
+CREATE TABLE ano.herb_species (
+global_id UUID PRIMARY KEY,
+parent_global_id UUID,
+navn text,
+dekning_prc double precision,
+creation_date timestamp,
+creator text,
+edit_date timestamp,
+editor text,
+CONSTRAINT fk_parent FOREIGN KEY(parent_global_id)
+REFERENCES ano.survey_points(global_id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+);"
+
+
+
+dbSendStatement(con, create_ano_species_Q)
+
+dbSendStatement(con, "CREATE INDEX ON ano.herb_species USING BTREE(global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.herb_species USING BTREE(parent_global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.herb_species USING BTREE(navn);")
+```
+```{r}
+dbWriteTable(con,
+             Id(schema = "ano", table = "herb_species"),
+             md_ano_species,
+             append = T)
+```
+
+Add tree species
+-------------
+
+```{r}
+md_ano_trees <- read.xlsx("../../Data/ANO_eksport_MD/ANO_ekspot_excel.xlsx", 
+                           detectDates = T,
+                           sheet = 3) %>% 
+  mutate(CreationDate = convertToDateTime(CreationDate, origin = "1899-12-30 00:00"),
+         EditDate = convertToDateTime(EditDate, origin = "1899-12-30 00:00")) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(md_ano_trees)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(md_ano_trees) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+md_ano_trees <- md_ano_trees %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.tree_species;")
+
+create_ano_trees_Q <- "
+CREATE TABLE ano.tree_species(
+global_id UUID PRIMARY KEY,
+parent_global_id UUID,
+navn text,
+creation_date timestamp,
+creator text,
+edit_date timestamp,
+editor text,
+CONSTRAINT fk_parent FOREIGN KEY(parent_global_id)
+REFERENCES ano.survey_points(global_id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+);"
+
+
+
+dbSendStatement(con, create_ano_trees_Q)
+
+dbSendStatement(con, "CREATE INDEX ON ano.tree_species USING BTREE(global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.tree_species USING BTREE(parent_global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.tree_species USING BTREE(navn);")
+```
+```{r}
+dbWriteTable(con,
+             Id(schema = "ano", table = "tree_species"),
+             md_ano_trees,
+             append = T)
+```
+
+Add problem species
+-----------------
+```{r}
+md_ano_problem <- read.xlsx("../../Data/ANO_eksport_MD/ANO_ekspot_excel.xlsx", 
+                           detectDates = T,
+                           sheet = 4) %>% 
+  mutate(CreationDate = convertToDateTime(CreationDate, origin = "1899-12-30 00:00"),
+         EditDate = convertToDateTime(EditDate, origin = "1899-12-30 00:00")) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(md_ano_problem)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(md_ano_problem) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+md_ano_problem <- md_ano_problem %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.problem_species;")
+
+create_ano_problem_Q <- "
+CREATE TABLE ano.problem_species(
+global_id UUID PRIMARY KEY,
+parent_global_id UUID,
+navn text,
+creation_date timestamp,
+creator text,
+edit_date timestamp,
+editor text,
+CONSTRAINT fk_parent FOREIGN KEY(parent_global_id)
+REFERENCES ano.survey_points(global_id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+);"
+
+
+
+dbSendStatement(con, create_ano_problem_Q)
+
+dbSendStatement(con, "CREATE INDEX ON ano.problem_species USING BTREE(global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.problem_species USING BTREE(parent_global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.problem_species USING BTREE(navn);")
+```
+```{r}
+dbWriteTable(con,
+             Id(schema = "ano", table = "problem_species"),
+             md_ano_problem,
+             append = T)
+```
+
+Add alien species
+------------
+```{r}
+md_ano_alien <- read.xlsx("../../Data/ANO_eksport_MD/ANO_ekspot_excel.xlsx", 
+                           detectDates = T,
+                           sheet = 5) %>% 
+  mutate(CreationDate = convertToDateTime(CreationDate, origin = "1899-12-30 00:00"),
+         EditDate = convertToDateTime(EditDate, origin = "1899-12-30 00:00")) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(md_ano_alien)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(md_ano_alien) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+md_ano_alien <- md_ano_alien %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+
+```{r, eval = F}
+dbSendStatement(con, "DROP TABLE IF EXISTS ano.alien_species;")
+
+create_ano_alien_Q <- "
+CREATE TABLE ano.alien_species(
+global_id UUID PRIMARY KEY,
+parent_global_id UUID,
+navn text,
+creation_date timestamp,
+creator text,
+edit_date timestamp,
+editor text,
+CONSTRAINT fk_parent FOREIGN KEY(parent_global_id)
+REFERENCES ano.survey_points(global_id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+);"
+
+
+
+dbSendStatement(con, create_ano_alien_Q)
+
+dbSendStatement(con, "CREATE INDEX ON ano.alien_species USING BTREE(global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.alien_species USING BTREE(parent_global_id);")
+dbSendStatement(con, "CREATE INDEX ON ano.alien_species USING BTREE(navn);")
+```
+```{r}
+dbWriteTable(con,
+             Id(schema = "ano", table = "alien_species"),
+             md_ano_alien,
+             append = T)
+```
+
+
+
+
+Add our own ANO-data for the semi-natural locations
+============
+I used the MD-data as a punching template, so we need to fix these similarly.
+
+Points first
+------------
+```{r}
+nina_ano_points <- read.xlsx("../../Data/ANO_reg/ANO_punching_Jens.xlsx", 
+                           detectDates = T,
+                           sheet = 1) %>%
+  as_tibble()
+```
+
+Check data format
+
+```{r}
+nina_ano_points %>% 
+  print(n = 1,
+        width = Inf)
+
+```
+
+
+
+We need to change some column names to fit PostgreSQL. No capital letters and dots.
+
+```{r}
+old_names <- names(nina_ano_points)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="tilstedeværelse_av_naturtype_etter_miljødirektoratets_instruks"] <- "tilstedeværelse_av_naturtype_etter_miljødirektoratets_instruk"
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+
+new_names
+```
+```{r}
+names(nina_ano_points) <- new_names
+```
+
+
+```{r}
+nina_ano_points <- nina_ano_points %>% 
+    mutate(x = lengdegrad,
+         y = breddegrad) %>% 
+  select(-c(her_skal_dekning_av_ano_variabler_på_250_m2_registeres__visuell_estimering_,
+            objectid,
+            arter_registrert,
+            lengdegrad,
+            breddegrad))
+
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.survey_points WHERE creator = 'Jens_Astrom_manual';")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "survey_points"),
+             nina_ano_points,
+             append = T)
+```
+
+Add inferred points
+```{r}
+add_inf_geoms <- "
+UPDATE ano.survey_points s
+SET geom_inferred = p.geom
+FROM ano.ano_18_points p
+WHERE s.ano_flate_id = p.ano_id
+AND s.ano_punkt_id = p.ano_point_id
+"
+
+dbSendStatement(con, add_inf_geoms)
+
+```
+
+```{r}
+add_inf_geoms <- "
+UPDATE ano.survey_points s
+SET geom_inferred = p.geom
+FROM ano.ano_18_points p
+WHERE s.ano_flate_id = p.ano_id
+AND s.ano_punkt_id = p.ano_point_id
+"
+
+dbSendStatement(con, add_inf_geoms)
+
+```
+
+Herb species
+------
+
+```{r}
+nina_ano_species <- read.xlsx("../../Data/ANO_reg/ANO_punching_Jens.xlsx", 
+                           detectDates = T,
+                           sheet = 2) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(nina_ano_species)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(nina_ano_species) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+nina_ano_species <- nina_ano_species %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         dekning_prc,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.herb_species WHERE creator = 'Jens_Astrom_manual';")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "herb_species"),
+             nina_ano_species,
+             append = T)
+```
+
+Trees
+------
+
+```{r}
+nina_ano_trees <- read.xlsx("../../Data/ANO_reg/ANO_punching_Jens.xlsx", 
+                           detectDates = T,
+                           sheet = 3) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(nina_ano_trees)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(nina_ano_trees) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+nina_ano_trees <- nina_ano_trees %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.tree_species WHERE creator = 'Jens_Astrom_manual';")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "tree_species"),
+             nina_ano_trees,
+             append = T)
+```
+
+
+Problem species
+-------
+
+```{r}
+nina_ano_problem <- read.xlsx("../../Data/ANO_reg/ANO_punching_Jens.xlsx", 
+                           detectDates = T,
+                           sheet = 4) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(nina_ano_problem)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(nina_ano_problem) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+nina_ano_problem <- nina_ano_problem %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.problem_species WHERE creator = 'Jens_Astrom_manual';")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "problem_species"),
+             nina_ano_problem,
+             append = T)
+```
+
+Alien species
+-------
+
+```{r}
+nina_ano_aliens <- read.xlsx("../../Data/ANO_reg/ANO_punching_Jens.xlsx", 
+                           detectDates = T,
+                           sheet = 5) %>% 
+  as_tibble()
+```
+
+Fix some column names
+```{r}
+old_names <- names(nina_ano_aliens)
+new_names <- tolower(old_names)
+new_names <- gsub("\\.", "_", new_names)
+new_names <- gsub(":", "", new_names)
+new_names <- gsub("\\?", "", new_names)
+new_names <- gsub("\\(", "", new_names)
+new_names <- gsub("\\)", "", new_names)
+new_names <- gsub("\\%", "prc", new_names)
+new_names <- gsub("\\-", "_", new_names)
+new_names <- gsub("\\/", "_", new_names)
+new_names[new_names=="globalid"] <- "global_id"
+new_names[new_names=="editdate"] <- "edit_date"
+new_names[new_names=="creationdate"] <- "creation_date"
+new_names[new_names=="parentglobalid"] <- "parent_global_id"
+new_names
+```
+
+```{r}
+names(nina_ano_aliens) <- new_names
+```
+
+Select just the columns to be imported.
+
+```{r}
+
+nina_ano_aliens <- nina_ano_aliens %>% 
+  select(global_id,
+         parent_global_id,
+         navn,
+         creation_date,
+         creator,
+         edit_date,
+         editor)
+
+```
+
+```{r}
+dbSendStatement(con, "DELETE FROM ano.alien_species WHERE creator = 'Jens_Astrom_manual';")
+
+dbWriteTable(con,
+             Id(schema = "ano", table = "alien_species"),
+             nina_ano_aliens,
+             append = T)
+
+
+```
+
+Weather data
+========
+The data exports for the temperature and humidity MX loggers from Hobo needs a bit of data wrangling before it can be used. The different data streams from each logger all get a separate column. Here we develop a script to turn this into a more usable long format. We also make tables in a database and upload the data there.
+
+
+Read in data
+==========
+We have an export file from Hobolink.com with many loggers as a csv file. We also have some individual csv files that failed to upload to the Hobo site, that we'll handle later on.
+
+```{r}
+inputFile <- "../../Data/klimalogger/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv"
+
+rawDat <- read_csv(inputFile,col_types = cols(.default = "c"))
+
+dat <- rawDat %>%  
+  select(-"Line#") %>% 
+  mutate(date = as.POSIXct(Date, format = "%m/%d/%y %H:%M:%S")) %>% 
+  mutate_if(is_character, as.double) %>% 
+  select(-Date)
+
+dat
+```
+That's quite the number of columns...
+
+
+We have to pivot this data set to a longer format. We also get rid of the rows with no data.
+```{r}
+temp <- dat %>% 
+  pivot_longer(cols = starts_with("Temperature"),
+               names_to = "logger_id",
+               values_to = "temperature") %>% 
+  select(date,
+         logger_id,
+         temperature) %>% 
+  filter(!is.na(temperature))
+
+rh <- dat %>% 
+  pivot_longer(cols = starts_with("RH"),
+               names_to = "logger_id",
+               values_to = "rh") %>% 
+  select(date,
+         logger_id,
+         rh)%>% 
+  filter(!is.na(rh))
+
+dew  <- dat %>% 
+  pivot_longer(cols = starts_with("Dew"),
+               names_to = "logger_id",
+               values_to = "dew") %>% 
+  select(date,
+         logger_id,
+         dew) %>% 
+  filter(!is.na(dew))
+
+```
+
+The data now looks like this
+```{r}
+temp
+```
+
+Time to strip the logger names and merge the tables
+
+```{r}
+temp <- temp %>% 
+  mutate(logger_id = str_extract(logger_id,
+                              "[^, ]+$"))
+
+rh <- rh %>% 
+  mutate(logger_id = str_extract(logger_id,
+                              "[^, ]+$"))
+dew <- dew %>% 
+  mutate(logger_id = str_extract(logger_id,
+                              "[^, ]+$"))
+
+```
+
+Check to see that the dates are the same for the datasets
+```{r}
+all(all(temp$date == rh$date),
+all(rh$date == dew$date))
+```
+
+```{r}
+combDat <- temp %>% 
+  full_join(rh,
+             by = c("date" = "date",
+                    "logger_id" = "logger_id")) %>% 
+  full_join(dew,
+            by = c("date" = "date",
+                    "logger_id" = "logger_id")) %>% 
+  arrange(logger_id,
+          date) %>% 
+    mutate(logger_type = "MX2301A") %>% 
+    select(date, 
+           logger_type,
+           logger_id,
+           temperature,
+           rh,
+           dew)
+```
+
+
+```{r}
+combDat
+```
+
+Package this into a function
+==========
+
+```{r}
+longerHobo2301 <- function(inputFile){
+  
+  rawDat <- read_csv(inputFile,col_types = cols(.default = "c"))
+
+  dat <- rawDat %>%  
+    select(-"Line#") %>% 
+    mutate(date = as.POSIXct(Date, format = "%m/%d/%y %H:%M:%S")) %>% 
+    mutate_if(is_character, as.double) %>% 
+    select(-Date)
+
+
+  temp <- dat %>% 
+    pivot_longer(cols = starts_with("Temperature"),
+               names_to = "logger_id",
+               values_to = "temperature") %>% 
+    select(date,
+         logger_id,
+         temperature) %>% 
+    filter(!is.na(temperature))
+
+  rh <- dat %>% 
+    pivot_longer(cols = starts_with("RH"),
+                 names_to = "logger_id",
+                 values_to = "rh") %>% 
+    select(date,
+           logger_id,
+           rh)%>% 
+    filter(!is.na(rh))
+  
+  dew  <- dat %>% 
+    pivot_longer(cols = starts_with("Dew"),
+                 names_to = "logger_id",
+                 values_to = "dew") %>% 
+    select(date,
+           logger_id,
+           dew) %>% 
+    filter(!is.na(dew))
+  
+  
+  temp <- temp %>% 
+    mutate(logger_id = str_extract(logger_id,
+                              "[^, ]+$"))
+  rh <- rh %>% 
+    mutate(logger_id = str_extract(logger_id,
+                                "[^, ]+$"))
+  dew <- dew %>% 
+    mutate(logger_id = str_extract(logger_id,
+                                "[^, ]+$"))
+  
+  if(!all(all(temp$date == rh$date),
+  all(rh$date == dew$date))) stop("Tables datetimes doesn't match")
+  
+  combDat <- temp %>% 
+  full_join(rh,
+             by = c("date" = "date",
+                    "logger_id" = "logger_id")) %>% 
+  full_join(dew,
+            by = c("date" = "date",
+                    "logger_id" = "logger_id")) %>% 
+  arrange(logger_id,
+          date) %>% 
+    mutate(logger_type = "MX2301A") %>% 
+    select(date, 
+           logger_type,
+           logger_id,
+           temperature,
+           rh,
+           dew)
+  
+  return(combDat)
+}
+```
+
+We can check that it produces the same results as the script.
+
+```{r}
+combDat2 <- longerHobo2301("../../Data/klimalogger/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv")
+
+all(combDat == combDat2)
+```
+
+
+Check the data out
+=======
+Some simple figures.
+
+```{r}
+ggplot(combDat2) +
+  geom_line(aes(x = date, y = temperature, color = logger_id)) +
+  ggtitle("All the temperatures so far")
+
+```
+
+```{r}
+oneLogger <- combDat %>% 
+  filter(logger_id == "20835815") %>% 
+  select(Date = date, 
+         logger_id,
+         Temperature = temperature,
+         Relative_humidity = rh,
+         Dew_point = dew) %>% 
+  pivot_longer(-c(Date, logger_id),
+               names_to = "Data_type",
+               values_to = "Values")
+  
+ggplot(oneLogger) +
+  geom_line(aes(x = Date, y = Values, color = Data_type)) +
+  scale_color_nina() +
+  ggtitle("All the data from one logger")
+```
+
+
+Combine with single files from loggers that weren't synced
+====================
+We had some troubles with the uploads from HoboConnect to Hobolink.com from the CAT-phones. So the logger files from Oslo is provided individually by email. Time to combine these as well. These have a different data format than the export from hobolink. They also have some extra columns at the end, which we can disregard.
+
+```{r}
+
+formatMX2301File <- function(inputFile){
+raw <- read_csv(file = inputFile,
+                col_types = cols())
+
+logger_id <- gsub("(.*/)([0-9]*)( .*)", "\\2", inputFile)
+  
+out <- raw %>% 
+  mutate(logger_id = logger_id,
+         date = as.POSIXct(`Date-Time (CET)`, format = "%m.%d.%Y %H.%M.%S"),
+         temperature = as.double(`Ch: 1 - Temperature  °C (°C)`),
+         rh = as.double(`Ch: 2 - RH  % (%)`),
+         dew = as.double(`Dew Point  °C (°C)`),
+         logger_type = "MX2301A") %>% 
+  select(date,
+         logger_type,
+         logger_id,
+         temperature,
+         rh,
+         dew)
+
+return(out)
+
+}
+```
+```{r, message = F}
+#logger_20835817 <- formatMX2301File("../../Data/klimalogger/20835817 2020-10-13 12_18_01 CET (Data CET).csv")
+#logger_20835819 <- formatMX2301File("../../Data/klimalogger/20835819 2020-10-14 14_33_12 CET (Data CET).csv")
+logger_20835820 <- formatMX2301File("../../Data/klimalogger/20835820 2020-10-16 14_09_17 CET (Data CET).csv")
+#logger_20835821 <- formatMX2301File("../../Data/klimalogger/20835821 2020-10-15 15_49_08 CET (Data CET).csv")
+#logger_20835823 <- formatMX2301File("../../Data/klimalogger/20835823 2020-10-15 12_11_02 CET (Data CET).csv")
+#logger_20843228 <- formatMX2301File("../../Data/klimalogger/20843228 2020-10-14 11_43_58 CET (Data CET).csv")
+#logger_20843229 <- formatMX2301File("../../Data/klimalogger/20843229 2020-10-16 09_59_17 CET (Data CET).csv")
+#logger_20843233 <- formatMX2301File("../../Data/klimalogger/20843233 2020-10-14 16_25_22 CET (Data CET).csv")
+#logger_20843238 <- formatMX2301File("../../Data/klimalogger/20843238 2020-10-16 16_52_35 CET (Data CET).csv")
+```
+
+Combine these files to the other ones.
+
+```{r}
+allMX2301 <- combDat2 %>% 
+  #rbind(logger_20835817) %>% 
+  #rbind(logger_20835819) %>% 
+  rbind(logger_20835820) 
+#%>% 
+  #rbind(logger_20835821) %>% 
+  #rbind(logger_20835823) %>% 
+  #rbind(logger_20843228) %>% 
+  #rbind(logger_20843229) %>% 
+  #rbind(logger_20843233) %>% 
+  #rbind(logger_20843238) 
+  
+```
+
+Double check dew points
+-------
+This is a simplified formula for dew point, that seems to correspond fairly OK with the logger data. Not likely to be errors here.
+```{r}
+dewPoint <- function(input){
+ 
+  input %>% 
+    mutate(calc_dew_point = temperature - ((100 - rh)/5)) %>% 
+  select(calc_dew_point)
+}
+```
+```{r, eval = F}
+combDat2
+dewPoint(combDat2)
+
+logger_20835817
+dewPoint(logger_20835817)
+```
+
+
+
+Handle the MX2201 loggers
+==========
+These are temperature and light loggers that where also placed at some locations (that also had sound loggers). They have slightly different format, so we adapt the function to handle these.
+
+
+```{r}
+longerHobo2202 <- function(inputFile){
+rawDat <- read_csv(inputFile,
+                   guess_max = 10000,
+                   col_types = cols())
+
+  dat <- rawDat %>%  
+    select(-"Line#") %>% 
+    mutate(date = as.POSIXct(Date, format = "%m/%d/%y %H:%M:%S")) %>% 
+    mutate_if(is_character, as.double) %>% 
+    select(-Date)
+
+
+   
+  temp <- dat %>% 
+    pivot_longer(cols = starts_with("Temperature"),
+               names_to = "logger_id",
+               values_to = "temperature") %>% 
+    select(date,
+         logger_id,
+         temperature) %>% 
+    filter(!is.na(temperature))
+
+  light <- dat %>% 
+    pivot_longer(cols = starts_with("Light"),
+                 names_to = "logger_id",
+                 values_to = "light") %>% 
+    select(date,
+           logger_id,
+           light)%>% 
+    filter(!is.na(light))
+  
+  
+  
+  temp <- temp %>% 
+    mutate(logger_id = str_extract(logger_id,
+                              "[^, ]+$"))
+  light <- light %>% 
+    mutate(logger_id = str_extract(logger_id,
+                                "[^, ]+$"))
+
+  if(!all(temp$date == light$date)) stop("Tables datetimes doesn't match")
+  
+  combDat <- temp %>% 
+  full_join(light,
+             by = c("date" = "date",
+                    "logger_id" = "logger_id")) %>% 
+  arrange(logger_id,
+          date) %>% 
+    mutate(logger_type = "MX2202") %>% 
+    select(date, 
+           logger_type,
+           logger_id,
+           temperature,
+           light)
+  
+  return(combDat)
+}
+```
+
+```{r}
+allMX2202 <- longerHobo2202(inputFile = "../rawData/Insect_MX2202_temp_light_2020_10_27_13_02_59_UTC_1.csv")
+```
+
+
+Write the data to the database
+==========
+In the database, we combine the logger types into one table, and make it even longer. I.e. we combine all values in one column. (Many ways to do this).
+
+
+```{r}
+allMX2301Long <- allMX2301 %>% 
+  pivot_longer(cols = c("temperature", "rh", "dew"),
+               names_to = "data_type")
+
+allMX2202Long <- allMX2202 %>% 
+  pivot_longer(cols = c("temperature", "light"),
+               names_to = "data_type")
+
+allLoggersLong <- allMX2301Long %>% 
+  rbind(allMX2202Long)
+
+```
+
+
+Make the database table
+-----------------
+
+```{r, eval = F}
+createLoggerSchemaQ <- "
+CREATE SCHEMA IF NOT EXISTS loggers;
+"
+
+createLoggerTableQ <- "
+CREATE TABLE IF NOT EXISTS loggers.logger_data (
+--id uuid NOT NULL DEFAULT gen_random_uuid(),
+id serial NOT NULL,
+date timestamptz NOT NULL,
+logger_type text NOT NULL,
+logger_id integer NOT NULL,
+data_type text NOT NULL,
+value double precision
+);
+
+"
+
+dbSendQuery(con, createLoggerSchemaQ)
+
+dbSendStatement(con, "
+GRANT ALL ON SCHEMA loggers TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA loggers TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA loggers TO ag_pgsql_radardata_rw;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;")
+
+
+dbSendQuery(con, createLoggerTableQ)
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_data USING BTREE(date);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_data USING BTREE(logger_type);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_data USING BTREE(logger_id);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_data USING BTREE(data_type);")
+
+```
+
+```{r, eval = T}
+dbSendStatement(con, "DELETE FROM loggers.logger_data;")
+
+dbWriteTable(con, 
+             name = Id(schema = "loggers", table = "logger_data"),
+             value = allLoggersLong,
+             append = T
+             )
+
+```
+
+Read in logger deployments
+```{r}
+logger_deployments <- read_delim("../../../Data/klimalogger/logger_deployments_2020.csv",
+                               delim = ";")
+```
+
+
+```{r, eval = F}
+createLoggerDeploymentsQ <- "
+CREATE TABLE IF NOT EXISTS loggers.logger_deployments (
+--id uuid NOT NULL DEFAULT gen_random_uuid(),
+id serial PRIMARY KEY,
+logger_id integer NOT NULL,
+logger_type text NOT NULL,
+year integer NOT NULL,
+location text NOT NULL
+);
+"
+dbSendQuery(con, createLoggerDeploymentsQ)
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_deployments USING BTREE(logger_id);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_deployments USING BTREE(logger_type);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_deployments USING BTREE(year);")
+
+dbSendQuery(con,
+            "CREATE INDEX ON loggers.logger_deployments USING BTREE(location);")
+
+
+```
+```{r, eval = F}
+dbWriteTable(con,
+             name = Id(schema = "loggers", table = "logger_deployments"),
+             value = logger_deployments,
+             append = T
+             )
+```
+
+Write the data as CSV
+=============
+We also write the data as csv files, if we don't want to use the database.
+
+```{r}
+write_csv(allLoggersLong, path = "../out/insectLogger_data_2020.csv")
+write_csv(logger_deployments, path = "../out/insect_logger_deployments.csv")
+```
+
+
+Bottle weights
+========
+Here we've weighed samples of all bottle types to be able to subtract the mean weight of these from the recorded weights.
+
+```{r}
+bottle_weights <- read_delim("../../Data/Genetikkdata/Tomflaske_vekter.csv",
+                             delim = ";",)
+
+bottle_weights <- bottle_weights %>% 
+  mutate(year = 2000)
+
+```
+
+```{r}
+create_catch_schema <- "
+CREATE SCHEMA IF NOT EXISTS catch_data;
+"
+
+dbSendStatement(con, create_catch_schema)
+
+dbSendStatement(con, "
+GRANT ALL ON SCHEMA catch_data TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA catch_data TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA catch_data TO ag_pgsql_radardata_rw;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA catch_data
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA catch_data
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA catch_data
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;")
+
+
+
+create_bottle_weights <- "
+CREATE TABLE catch_data.bottle_weights (
+id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+bottle_type text,
+bottle_nr integer,
+year integer,
+dry_weight double precision
+)
+"
+
+dbSendStatement(con, create_bottle_weights)
+
+dbWriteTable(con,
+             name = Id(schema = "catch_data", table = "bottle_weights"),
+             value = bottle_weights,
+             append = T)
+
+```
+
 
 
 
