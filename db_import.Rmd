@@ -31,6 +31,7 @@ require(NinaR)
 require(sf)
 require(openxlsx)
 require(dbplyr)
+require(hms)
 ```
 
 
@@ -61,7 +62,7 @@ palette(ninaPalette())
 source("~/.rpgpass")
 #This connects to the gisdatabase with a DBI connection named `con`.
 #Use for example dbGetQuery(con, "SELECT * FROM ....") to query the database
-dbDisconnect(con)
+dbDisconnect(conn = con)
 con <- dbConnect(Postgres(), 
                  dbname = "insect_monitoring",
                  host = "ninradardata01.nina.no",
@@ -122,6 +123,13 @@ dbSendQuery(con, "CREATE INDEX ON traps.trap_locations USING GIST(geom);")
 ```
 
 
+```{r, eval = F}
+dbWriteTable(con, 
+             Id(schema = "traps", table = "trap_locations"),
+             trap_loc)
+```
+
+
 Quick plot of the traps
 ========
 Here we make a simple plot of just one location.
@@ -143,6 +151,53 @@ ggplot(.) +
   coord_sf(datum = sf::st_crs(25833)) +
   labs(caption = "\U00a9 OpenStreetMap contributors")
 ```
+
+Locations 2020
+========
+```{r}
+loc <- read_delim("../../Data/trap_locations/locations_2020.csv",
+                     delim = ",")
+
+loc <- loc %>% 
+  mutate(year = 2020) %>% 
+  select(location = locality,
+         year,
+         ano_flate_id)
+
+```
+```{r}
+
+dbSendQuery(con, "DROP TABLE IF EXISTS traps.locations;")
+
+create_loc_q <- "
+CREATE TABLE traps.locations (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+location text NOT NULL,
+year integer NOT NULL,
+ano_flate_id text NOT NULL
+
+)
+
+"
+
+dbSendQuery(con, create_loc_q)
+
+```
+
+```{r}
+
+dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(location);")
+dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(ano_flate_id);")
+dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(year);")
+```
+
+```{r, eval = F}
+dbWriteTable(con, 
+             Id(schema = "traps", table = "locations"),
+             loc,
+             append = T)
+```
+
 
 
 Import ANO records
@@ -1146,13 +1201,12 @@ Weather data
 ========
 The data exports for the temperature and humidity MX loggers from Hobo needs a bit of data wrangling before it can be used. The different data streams from each logger all get a separate column. Here we develop a script to turn this into a more usable long format. We also make tables in a database and upload the data there.
 
-
 Read in data
 ==========
 We have an export file from Hobolink.com with many loggers as a csv file. We also have some individual csv files that failed to upload to the Hobo site, that we'll handle later on.
 
 ```{r}
-inputFile <- "../../Data/klimalogger/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv"
+inputFile <- "../rawData/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv"
 
 rawDat <- read_csv(inputFile,col_types = cols(.default = "c"))
 
@@ -1187,14 +1241,14 @@ rh <- dat %>%
          rh)%>% 
   filter(!is.na(rh))
 
-dew  <- dat %>% 
+dew_point  <- dat %>% 
   pivot_longer(cols = starts_with("Dew"),
                names_to = "logger_id",
-               values_to = "dew") %>% 
+               values_to = "dew_point") %>% 
   select(date,
          logger_id,
-         dew) %>% 
-  filter(!is.na(dew))
+         dew_point) %>% 
+  filter(!is.na(dew_point))
 
 ```
 
@@ -1213,7 +1267,7 @@ temp <- temp %>%
 rh <- rh %>% 
   mutate(logger_id = str_extract(logger_id,
                               "[^, ]+$"))
-dew <- dew %>% 
+dew_point <- dew_point %>% 
   mutate(logger_id = str_extract(logger_id,
                               "[^, ]+$"))
 
@@ -1222,7 +1276,7 @@ dew <- dew %>%
 Check to see that the dates are the same for the datasets
 ```{r}
 all(all(temp$date == rh$date),
-all(rh$date == dew$date))
+all(rh$date == dew_point$date))
 ```
 
 ```{r}
@@ -1230,7 +1284,7 @@ combDat <- temp %>%
   full_join(rh,
              by = c("date" = "date",
                     "logger_id" = "logger_id")) %>% 
-  full_join(dew,
+  full_join(dew_point,
             by = c("date" = "date",
                     "logger_id" = "logger_id")) %>% 
   arrange(logger_id,
@@ -1241,7 +1295,7 @@ combDat <- temp %>%
            logger_id,
            temperature,
            rh,
-           dew)
+           dew_point)
 ```
 
 
@@ -1282,14 +1336,14 @@ longerHobo2301 <- function(inputFile){
            rh)%>% 
     filter(!is.na(rh))
   
-  dew  <- dat %>% 
+  dew_point  <- dat %>% 
     pivot_longer(cols = starts_with("Dew"),
                  names_to = "logger_id",
-                 values_to = "dew") %>% 
+                 values_to = "dew_point") %>% 
     select(date,
            logger_id,
-           dew) %>% 
-    filter(!is.na(dew))
+           dew_point) %>% 
+    filter(!is.na(dew_point))
   
   
   temp <- temp %>% 
@@ -1298,18 +1352,18 @@ longerHobo2301 <- function(inputFile){
   rh <- rh %>% 
     mutate(logger_id = str_extract(logger_id,
                                 "[^, ]+$"))
-  dew <- dew %>% 
+  dew_point <- dew_point %>% 
     mutate(logger_id = str_extract(logger_id,
                                 "[^, ]+$"))
   
   if(!all(all(temp$date == rh$date),
-  all(rh$date == dew$date))) stop("Tables datetimes doesn't match")
+  all(rh$date == dew_point$date))) stop("Tables datetimes doesn't match")
   
   combDat <- temp %>% 
   full_join(rh,
              by = c("date" = "date",
                     "logger_id" = "logger_id")) %>% 
-  full_join(dew,
+  full_join(dew_point,
             by = c("date" = "date",
                     "logger_id" = "logger_id")) %>% 
   arrange(logger_id,
@@ -1320,7 +1374,7 @@ longerHobo2301 <- function(inputFile){
            logger_id,
            temperature,
            rh,
-           dew)
+           dew_point)
   
   return(combDat)
 }
@@ -1329,7 +1383,7 @@ longerHobo2301 <- function(inputFile){
 We can check that it produces the same results as the script.
 
 ```{r}
-combDat2 <- longerHobo2301("../../Data/klimalogger/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv")
+combDat2 <- longerHobo2301("../rawData/Insektoverv_k_2020_2020_11_10_11_56_24_UTC_1.csv")
 
 all(combDat == combDat2)
 ```
@@ -1353,7 +1407,7 @@ oneLogger <- combDat %>%
          logger_id,
          Temperature = temperature,
          Relative_humidity = rh,
-         Dew_point = dew) %>% 
+         Dew_point = dew_point) %>% 
   pivot_longer(-c(Date, logger_id),
                names_to = "Data_type",
                values_to = "Values")
@@ -1367,44 +1421,54 @@ ggplot(oneLogger) +
 
 Combine with single files from loggers that weren't synced
 ====================
-We had some troubles with the uploads from HoboConnect to Hobolink.com from the CAT-phones. So the logger files from Oslo is provided individually by email. Time to combine these as well. These have a different data format than the export from hobolink. They also have some extra columns at the end, which we can disregard.
+We had some troubles with the uploads from HoboConnect to Hobolink.com from the CAT-phones. So the logger files from Oslo is provided individually by email. Time to combine these as well. These have a different data format than the export from hobolink. They also use comma as a decimal delimeter, as well as column delimeter, which complicates things. I think the HoboConnect app might pick the decimal delimiter from the locale of the phones, but doesn't adjust the colum delimiter.
 
 ```{r}
 
 formatMX2301File <- function(inputFile){
 raw <- read_csv(file = inputFile,
-                col_types = cols())
+                col_types = cols(
+  `#` = col_integer(),
+  `Date-Time (CET)` = col_datetime(format = "%m.%d.%Y %H.%M.%S"),
+  `Ch: 1 - Temperature  °C (°C)` = col_integer(),
+  `Ch: 2 - RH  % (%)` = col_integer(),
+  `Dew Point  °C (°C)` = col_integer(),
+  `Button Down` = col_integer(),
+  `Host Connected` = col_integer(),
+  `End of File` = col_integer()
+))
 
 logger_id <- gsub("(.*/)([0-9]*)( .*)", "\\2", inputFile)
   
 out <- raw %>% 
-  mutate(logger_id = logger_id,
-         date = as.POSIXct(`Date-Time (CET)`, format = "%m.%d.%Y %H.%M.%S"),
-         temperature = as.double(`Ch: 1 - Temperature  °C (°C)`),
-         rh = as.double(`Ch: 2 - RH  % (%)`),
-         dew = as.double(`Dew Point  °C (°C)`),
-         logger_type = "MX2301A") %>% 
+  filter(!is.na(`Ch: 1 - Temperature  °C (°C)`)) %>% 
+  unite("temperature", `Ch: 1 - Temperature  °C (°C)`, `Ch: 2 - RH  % (%)`, sep = ".") %>% 
+  unite("rh", `Dew Point  °C (°C)`, `Button Down`, sep = ".") %>% 
+  unite("dew_point", `Host Connected`, `End of File`, sep = ".") %>% 
+  mutate(logger_type = "MX2301A",
+         date = `Date-Time (CET)`,
+         logger_id = logger_id) %>% 
   select(date,
          logger_type,
          logger_id,
          temperature,
          rh,
-         dew)
+         dew_point)
 
 return(out)
 
 }
 ```
 ```{r, message = F}
-#logger_20835817 <- formatMX2301File("../../Data/klimalogger/20835817 2020-10-13 12_18_01 CET (Data CET).csv")
-#logger_20835819 <- formatMX2301File("../../Data/klimalogger/20835819 2020-10-14 14_33_12 CET (Data CET).csv")
-logger_20835820 <- formatMX2301File("../../Data/klimalogger/20835820 2020-10-16 14_09_17 CET (Data CET).csv")
-#logger_20835821 <- formatMX2301File("../../Data/klimalogger/20835821 2020-10-15 15_49_08 CET (Data CET).csv")
-#logger_20835823 <- formatMX2301File("../../Data/klimalogger/20835823 2020-10-15 12_11_02 CET (Data CET).csv")
-#logger_20843228 <- formatMX2301File("../../Data/klimalogger/20843228 2020-10-14 11_43_58 CET (Data CET).csv")
-#logger_20843229 <- formatMX2301File("../../Data/klimalogger/20843229 2020-10-16 09_59_17 CET (Data CET).csv")
-#logger_20843233 <- formatMX2301File("../../Data/klimalogger/20843233 2020-10-14 16_25_22 CET (Data CET).csv")
-#logger_20843238 <- formatMX2301File("../../Data/klimalogger/20843238 2020-10-16 16_52_35 CET (Data CET).csv")
+#logger_20835817 <- formatMX2301File("../rawData/20835817 2020-10-13 12_18_01 CET (Data CET).csv")
+#logger_20835819 <- formatMX2301File("../rawData/20835819 2020-10-14 14_33_12 CET (Data CET).csv")
+logger_20835820 <- formatMX2301File("../rawData/20835820 2020-10-16 14_09_17 CET (Data CET).csv")
+#logger_20835821 <- formatMX2301File("../rawData/20835821 2020-10-15 15_49_08 CET (Data CET).csv")
+#logger_20835823 <- formatMX2301File("../rawData/20835823 2020-10-15 12_11_02 CET (Data CET).csv")
+#logger_20843228 <- formatMX2301File("../rawData/20843228 2020-10-14 11_43_58 CET (Data CET).csv")
+#logger_20843229 <- formatMX2301File("../rawData/20843229 2020-10-16 09_59_17 CET (Data CET).csv")
+#logger_20843233 <- formatMX2301File("../rawData/20843233 2020-10-14 16_25_22 CET (Data CET).csv")
+#logger_20843238 <- formatMX2301File("../rawData/20843238 2020-10-16 16_52_35 CET (Data CET).csv")
 ```
 
 Combine these files to the other ones.
@@ -1522,7 +1586,7 @@ In the database, we combine the logger types into one table, and make it even lo
 
 ```{r}
 allMX2301Long <- allMX2301 %>% 
-  pivot_longer(cols = c("temperature", "rh", "dew"),
+  pivot_longer(cols = c("temperature", "rh", "dew_point"),
                names_to = "data_type")
 
 allMX2202Long <- allMX2202 %>% 
@@ -1557,24 +1621,6 @@ value double precision
 "
 
 dbSendQuery(con, createLoggerSchemaQ)
-
-dbSendStatement(con, "
-GRANT ALL ON SCHEMA loggers TO ag_pgsql_radardata_admin;")
-
-dbSendStatement(con, "GRANT USAGE ON SCHEMA loggers TO ag_pgsql_radardata_ro;")
-
-dbSendStatement(con, "GRANT USAGE ON SCHEMA loggers TO ag_pgsql_radardata_rw;")
-
-dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
-GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;")
-
-dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
-GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;")
-
-dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA loggers
-GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;")
-
-
 dbSendQuery(con, createLoggerTableQ)
 
 dbSendQuery(con,
@@ -1711,6 +1757,150 @@ dbWriteTable(con,
 
 ```
 
+Import landsskogstaksering
+============
 
+```{r}
+create_landsskog_schema <- "
+CREATE SCHEMA IF NOT EXISTS landsskog;
+"
+
+dbSendStatement(con, create_landsskog_schema)
+
+dbSendStatement(con, "
+GRANT ALL ON SCHEMA landsskog TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA landsskog TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "GRANT USAGE ON SCHEMA landsskog TO ag_pgsql_radardata_rw;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA landsskog
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA landsskog
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;")
+
+dbSendStatement(con, "ALTER DEFAULT PRIVILEGES IN SCHEMA landsskog
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;")
+```
+
+```{r}
+landsskog_points <- read.xlsx("../../Data/Landsskogstaksering/landskog_punching_JÅ.xlsx",
+                             sheet = 1,
+                             detectDates = T,) %>% 
+  mutate(registreringsdato = as.Date(registreringsdato, format = "%d.%m.%Y"),
+         klokkeslett_start = as_hms(convertToDateTime(klokkeslett_start, origin = "1899-12-30 00:00")),
+         klokkeslett_slutt = as_hms(convertToDateTime(klokkeslett_slutt, origin = "1899-12-30 00:00"))) %>% 
+  as_tibble()
+
+landsskog_points
+```
+
+
+```{r, eval = F}
+create_landsskog_points <- "
+CREATE TABLE landsskog.survey_points (
+id uuid PRIMARY KEY,
+ano_flate_id text,
+ano_punkt_id integer,
+observer text,
+registreringsdato date,
+klokkeslett_start time,
+klokkeslett_slutt time,
+skogkarakter integer
+)
+"
+
+dbSendStatement(con, create_landsskog_points)
+
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_points USING BTREE(ano_flate_id);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_points USING BTREE(ano_punkt_id);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_points USING BTREE(registreringsdato);")
+
+```
+
+```{r, eval = F}
+dbSendStatement(con, "DELETE FROM landsskog.survey_points;")
+
+dbWriteTable(con,
+             Id(schema = "landsskog", table = "survey_points"),
+             landsskog_points,
+             append = T)
+```
+
+```{r}
+landsskog_data <- read.xlsx("../../Data/Landsskogstaksering/landskog_punching_JÅ.xlsx",
+                             sheet = 2) 
+
+landsskog_data
+```
+!!NOT DONE, continue formatting and make db-table
+
+```{r}
+landsskog_data <- landsskog_data %>% 
+  mutate(Høydetre = as.logical(Høydetre),
+         Boniteringstre = as.logical(Boniteringstre)) %>% 
+  mutate(Høydetre = ifelse(is.na(Høydetre), F, Høydetre),
+         Boniteringstre = ifelse(is.na(Boniteringstre), F, Boniteringstre)) %>% 
+  select(id,
+         parent_id,
+         tre_nummer = Tre.nummer,
+         treslag = Treslag,
+         diameter_breast_height = DBH,
+         tilstand = Tilstand,
+         kommentar = Kommentar,
+         hoydetre = Høydetre,
+         trehoyde = Trehøyde,
+         boniteringstre = Boniteringstre,
+         alder = Alder) %>% 
+  as_tibble()
+  
+landsskog_data
+```
+
+```{r, eval = F}
+
+create_landsskog_data <- "
+CREATE TABLE landsskog.survey_data (
+id uuid PRIMARY KEY,
+parent_id uuid,
+tre_nummer integer,
+treslag integer,
+diameter_breast_height double precision,
+tilstand integer,
+kommentar text,
+hoydetre boolean,
+trehoyde double precision,
+boniteringstre boolean,
+alder double precision,
+CONSTRAINT fk_landskog_point FOREIGN KEY(parent_id) 
+REFERENCES landsskog.survey_points(id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+)
+"
+
+
+dbSendStatement(con, "DROP TABLE IF EXISTS landsskog.survey_data;")
+
+dbSendStatement(con, create_landsskog_data)
+
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(parent_id);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(treslag);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(hoydetre);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(boniteringstre);")
+
+```
+
+
+
+```{r, eval = F}
+dbSendStatement(con, "DELETE FROM landsskog.survey_data;")
+
+dbWriteTable(con,
+             Id(schema = "landsskog", table = "survey_data"),
+             landsskog_data,
+             append = T)
+```
 
 
