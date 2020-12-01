@@ -9,36 +9,23 @@ output:
     toc: yes
 ---
 
-**To-do**
-* Remove extra lysation samples!!! Some samples got two runs, with two lysate runs
+Intro
+========
+This script performs some basic analyses and produces figures for a report on the activity of the first year of a Norwegian insect monitoring program, in 2020. The project is financed by the Environmental Agency in Norway, and is the first continuous, general insect monitoring program in Norway. We employ malaise and window traps in semi-natural and forest locations. The monitoring is currently delimited to Eastern Norway. 
+Further information about the project can be found here:
 
-* These species are not matched to the gyldig names in artsdatabasen yet.
-* Should store dates and times separately as well in logger_data table. Easier to subset later.
+https://www.nina.no/V%C3%A5re-fagomr%C3%A5der/Milj%C3%B8overv%C3%A5king-p%C3%A5-land/Overv%C3%A5king-av-insekter
 
-* Notera i rapport hur många treffer som er misstenkte.  
+This is a live document that contains code in a pretty raw format. It's not intended to be reproducible at this point. A separate document holds code relating to the database, where the data is stored.
 
 
-* Make plots of phenology
-  - No. species over the season for each location. Split into separate figs for the two habitats?
-  - Relate this to local temperature, temperature sums?
-  
-* Plots of number of samples over time
-
-* Check differences btw 2 week and 4 week sampling
-  - Compare first and second of the 2 weeks, see if any of the have more overlap with 4 week. If 4 week becomes full, the first 2 week period should overlap more.
-  - Do this for window traps as well.
-* Within habitat, check relationship btw species richness and a few variables
-  - Forest age
-  - Diversity of fauna
-  - Temperature
-  - Altitude
 
 
 ```{r, include = F}
 #Some common packages, loading rmarkdown doesn't like the messages from tidyverse, so we don't include this in the document'
 require(tidyverse)
 require(DBI)
-require(RPostgreSQL)
+require(RPostgres)
 require(dbplyr)
 require(ggplot2)
 require(xtable)
@@ -47,6 +34,7 @@ require(gridExtra)
 require(hms)
 require(ggeffects)
 require(lme4)
+require(ggrepel)
 ```
 
 
@@ -73,13 +61,15 @@ palette(ninaPalette())
 
 Data import and cleaning
 ==============
-At this point I get the raw data from Marie, which requires some cleaning. In the future, we'll put this all in a database, and separate out the cleaning and database import in a separate script.
+At this point I get the raw data from Marie, which requires some cleaning. In the future, we'll put this all in a database, and separate out the cleaning and database import in a separate script. This will then start with instructions on how to access the raw data from public sources, so that it is reproducible. 
+
+Mind that this is still draft.
 
 ```{r, include = F, eval = T}
 source("~/.rpgpass")
 #This connects to the gisdatabase with a DBI connection named `con`.
 #Use for example dbGetQuery(con, "SELECT * FROM ....") to query the database
-con <- dbConnect(PostgreSQL(),
+con <- dbConnect(Postgres(),
           host = "ninradardata01.nina.no", 
                  dbname = "insect_monitoring",
                  user = username,
@@ -91,14 +81,13 @@ rm(username, password)
 
 ```{r import_csv}
 
-#dat <- read.delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_19102020.txt", sep= " ") %>% 
-#  as.tibble()
-
-#dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_19102020.txt",
-
-dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_744_26102020.txt", 
+dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_743_744_748_23112020.txt", 
                   delim= ";",
-                  col_types = cols(
+                  na = c("NA",
+                         "N/A",
+                         "Maa veies",
+                         "Smaa flasker maa veies"),
+                 col_types = cols(
   kingdom = col_character(),
   phylum = col_character(),
   class = col_character(),
@@ -110,6 +99,18 @@ dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_744
   value = col_double(),
   GenlabID = col_character(),
   GUID = col_character(),
+  mottatt_lab = col_character(),
+  locality = col_character(),
+  trap = col_character(),
+  date_placed = col_date(format = "%d.%m.%Y"),
+  time_placed = col_time(format = ""),
+  empty_week = col_double(),
+  date_emptied = col_date(format = "%d.%m.%Y"),
+  time_emptied = col_time(format = ""),
+  liquid = col_character(),
+  person_emptied = col_character(),
+  sample_id = col_character(),
+  comment = col_character(),
   Tilsatt_antall_C.analis_SI_USA_08.06.20 = col_double(),
   Tilsatt_antall_C.chinensis_08.06.20 = col_double(),
   Tilsatt_antall_Sirisser = col_double(),
@@ -119,7 +120,7 @@ dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_744
   Vekt_flaske_med_EtOH_og_insekter_.g. = col_double(),
   Vekt_flaske_._insekter_vaat_.g. = col_double(),
   Vekt_flaske_._insekter_toerr_.g. = col_double(),
-  Totalvolum_.mengde_ATL_._prot.K_mL. = col_character(),
+  Totalvolum_.mengde_ATL_._prot.K_mL. = col_double(),
   Vaatvekt_.g. = col_double(),
   Toerrvekt_.g. = col_double(),
   Kommentar_proeve = col_character(),
@@ -132,22 +133,16 @@ dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_744
   X260_230 = col_double(),
   Labperson = col_character(),
   Ekstraksjonskommentar = col_character(),
-  locality = col_character(),
-  trap = col_character(),
-  date_placed = col_date(format = "%d.%m.%Y"),
-  time_placed = col_time(format = ""),
-  empty_week = col_double(),
-  date_emptied = col_date(format = "%d.%m.%Y"),
-  time_emptied = col_time(format = ""),
-  liquid = col_character(),
-  person_emptied = col_character(),
-  sample_id = col_character(),
-  mottat_lab = col_character(),
-  comment = col_character()
-),
-na = c("NA",
-       "N/A",
-       "Maa veies"
+  kommentar_genlab = col_character(),
+  run = col_character(),
+  taxonomic_level = col_character(),
+  identification_confidence = col_character(),
+  possible_marker_issue = col_logical(),
+  probable_database_insufficiency = col_logical(),
+  norsk = col_logical(),
+  antall_arter_i_norge = col_double(),
+  antall_norsk_arter_i_db = col_double(),
+  pct_db_coverage = col_double()
 )
 )
 
@@ -157,7 +152,7 @@ na = c("NA",
 spec(dat)
 ```
 
-Fix some coding errors.
+Fix some coding issues.
 ```{r fix_coding}
 # dat %>% 
 #   select(genus, species, new_species) %>% 
@@ -219,18 +214,9 @@ dat %>%
          family,
          genus,
          species) %>% 
-  write_excel_csv(path = "out/species_list_2020-11-02.csv")
+  write_excel_csv(file = "out/species_list_2020-11-02.csv")
 ```
 
-
-
-Filter out the Nerlandsøya samples
-===========
-```{r}
-dat <- dat %>% 
-  filter(locality != "Nerlandsoeya") %>% 
-  droplevels()
-```
 
 Add missing bottle weights. This is based on a sample of bottle dry weight measurements made after the regular weighings. 
 
@@ -240,11 +226,11 @@ bottle_weights <- tbl(con,
   select(-id)
 
 
-bottle_weights %>% 
-  filter(bottle_type == "MF" & year == 2000) %>% 
-  select(dry_weight) %>% 
-  ggplot(.) +
-  geom_density(aes(x = dry_weight))
+# bottle_weights %>% 
+#   filter(bottle_type == "MF" & year == 2000) %>% 
+#   select(dry_weight) %>% 
+#   ggplot(.) +
+#   geom_density(aes(x = dry_weight))
 
 bottle_weights_MF <- bottle_weights %>% 
   filter(bottle_type == "MF" & year == 2000) %>% 
@@ -253,8 +239,20 @@ bottle_weights_MF <- bottle_weights %>%
   collect()
 
 
-```
+bottle_weights_VF_stor <- bottle_weights %>% 
+  filter(bottle_type == "VF_stor" & year == 2000) %>% 
+  select(dry_weight) %>% 
+  summarize(mean_weight = mean(dry_weight)) %>% 
+  collect()
 
+bottle_weights_VF_liten <- bottle_weights %>% 
+  filter(bottle_type == "VF_liten" & year == 2000) %>% 
+  select(dry_weight) %>% 
+  summarize(mean_weight = mean(dry_weight)) %>% 
+  collect()
+
+```
+Add mean bottle weights for the missing MF bottles. 
 ```{r}
 sum(is.na(dat$Vekt_tom_flaske_.g.))
 dat <- dat %>% 
@@ -263,12 +261,60 @@ dat <- dat %>%
 sum(is.na(dat$Vekt_tom_flaske_.g.))
 ```
 
+The window traps is a little bit trickier, since we might use different bottle sizes. We have to add the big bottle weights to the samples that plausibly used big bottles, i.e. dry weights around the big bottle weights. Here we use a cutoff for the bottle types of 50 grams.
+
 ```{r}
 dat <- dat %>% 
-  mutate(Vaatvekt_.g. = Vekt_flaske_._insekter_vaat_.g. - Vekt_tom_flaske_.g.,
-         Toerrvekt_.g. = Vekt_flaske_._insekter_toerr_.g. - Vekt_tom_flaske_.g.)
+  mutate(Vekt_tom_flaske_.g. = ifelse(trap_type == "Vindu" & is.na(Vekt_tom_flaske_.g.) & Vekt_flaske_._insekter_toerr_.g. > 50, bottle_weights_VF_stor$mean_weight, Vekt_tom_flaske_.g.))
+sum(is.na(dat$Vekt_tom_flaske_.g.))
 ```
 
+Add the small bottle weights.
+```{r}
+dat <- dat %>% 
+  mutate(Vekt_tom_flaske_.g. = ifelse(trap_type == "Vindu" & is.na(Vekt_tom_flaske_.g.) & Vekt_flaske_._insekter_toerr_.g. < 50, bottle_weights_VF_liten$mean_weight, Vekt_tom_flaske_.g.))
+sum(is.na(dat$Vekt_tom_flaske_.g.))
+```
+
+
+```{r}
+dat <- dat %>% 
+     mutate(Vaatvekt_.g. = Vekt_flaske_._insekter_vaat_.g. - Vekt_tom_flaske_.g.,
+            Toerrvekt_.g. = Vekt_flaske_._insekter_toerr_.g. - Vekt_tom_flaske_.g.)
+```
+
+
+
+
+Filter out the Nerlandsøya samples
+===========
+This is part of a cooperation with Norsøk, where we analysed the samples from one malaisetrap.
+
+```{r}
+nerland_data <- dat %>% 
+  filter(locality == "Nerlandsoeya") %>% 
+  droplevels()
+
+nerland_data %>% 
+  summarise(no_samples = n_distinct(sample))
+
+nerland_data %>% 
+  select(sample) %>% 
+  distinct()
+
+nerland_data %>% 
+  summarise(no_spec = n_distinct(order, family, genus, species))
+
+write_csv(nerland_data,
+          file = "out/Nerlandsoya_insekt_juli.csv")
+```
+
+
+```{r}
+dat <- dat %>% 
+  filter(locality != "Nerlandsoeya") %>% 
+  droplevels()
+```
 
 
 Check the emptying dates.
@@ -317,8 +363,47 @@ dat %>%
 #   print(n = Inf)
 ```
 
-Set weeks sampled manually for the few locations in Oslo that got an extra short sampling in the beginning.
+Fix a few typing errors in the dates. This is updated now in the sources, and should be fixed in the next data version.
+
 ```{r}
+dat %>% 
+  filter(days_collected <1) %>% 
+  select(locality, sample_id, trap, date_placed, date_emptied) %>% 
+  distinct()
+```
+```{r}
+dat <- dat %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_2_MF1_week_34", as.Date("2020-08-05"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_2_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_emptied = replace(date_emptied, sample_id == "semi-nat_6_MF1_week_34", as.Date("2020-08-19"))) %>% 
+  mutate(date_emptied = replace(date_emptied, sample_id == "semi-nat_6_MF2_week_34", as.Date("2020-08-19"))) %>%  
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_7_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_8_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_MF1_week_36", as.Date("2020-08-18"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_VF1_week_36", as.Date("2020-08-18")))  %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_VF3_week_36", as.Date("2020-08-18")))  %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_VF1_week_36", as.Date("2020-08-19")))%>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_VF3_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_8_MF1_week_36", as.Date("2020-08-18"))) 
+
+```
+
+
+```{r}
+dat <- dat %>% 
+  mutate(days_collected = as.numeric(dat$date_emptied - dat$date_placed))
+```
+
+```{r}
+dat %>% 
+  filter(days_collected <1) %>% 
+  select(locality, sample_id, trap, date_placed, date_emptied) %>% 
+  distinct()
+```
+
+Set weeks sampled manually for the few locations in Oslo that got an extra short sampling in the beginning.
+```{r sample_days_check}
 ggplot(dat, aes(x = weeks_sampled, y = days_collected, group = weeks_sampled)) +
   geom_boxplot()
 
@@ -384,6 +469,33 @@ dat %>%
 
 ```
 
+This include samples by `r max(dat$date_emptied)`.
+
+```{r}
+max(dat$date_emptied)
+```
+
+How many of the taxa have we identified to species level?
+
+```{r}
+not_id <- dat %>% 
+  filter(grepl("sp. ", species)) %>% 
+  summarise(no_identified = n_distinct(order, family, genus, species))
+
+not_id
+```
+
+```{r}
+id <- dat %>% 
+  filter(!grepl("sp. ", 
+               species)) %>% 
+  summarise(no_identified = n_distinct(order, family, genus, species))
+
+id
+```
+
+We still lack species identifications on `r 100 * not_id / (not_id + id)` percent of the taxa.
+
 
 Basic species richness graphs
 ==============
@@ -439,39 +551,6 @@ dat %>%
 
 Basic biomass graphs
 ==============
-NB, we still have some missing data on the weight of the bottles.
-
-Quick quality check of the spread of the bottle weights. Could we impute the missing values?
-```{r}
-dat %>% 
-  select(Vekt_tom_flaske_.g.,
-         Vekt_flaske_med_EtOH_og_insekter_.g.,
-         Vekt_flaske_._insekter_vaat_.g.,
-         Vekt_flaske_._insekter_toerr_.g.,
-         Vaatvekt_.g.,
-         Toerrvekt_.g.)
-```
-
-```{r}
-ggplot(dat)  +
-  geom_histogram(aes(Vekt_tom_flaske_.g., fill = trap_type))
-```
-
-
-```{r}
-hist(dat$Vekt_tom_flaske_.g.)
-```
-
-```{r}
-table(dat$Vekt_tom_flaske_.g.)
-```
-These bottle weights are weirdly consistent. Did they really weigh all bottles? UPDATE WITH NEW BOTTLE WEIGHTS. !!DONE!!
-
-```{r}
-summary(dat$Toerrvekt_.g.)
-```
-
-
 
 Quick look at the biomass at the different sites.
 
@@ -503,15 +582,22 @@ dat %>%
   xlab("Lokalitet")
 ```
 
+Check out the high values. Nothing obviously suspicious.
+
+```{r}
+dat %>% 
+  filter(grepl("VF", trap)) %>% 
+  filter(Toerrvekt_.g. >5) %>%
+  group_by(GenlabID) %>% 
+  summarise(mean_toerr_fl = mean(Vekt_flaske_._insekter_toerr_.g.),
+            mean_tom_fl = mean(Vekt_tom_flaske_.g.),
+            locality = first(locality),
+            empty_week = mean(empty_week))
+```
 
 
 Check overlap between malaise and window traps
 ==============
-Simple: total spec richn for all traps and times per location, plus the same for just malaise and window traps. group in figure by location
-
-complex: tally how many spec is found in only one trap type. No unecessary
-
-per species: which sp is only found in one trap type. or per species, % of findings in each trap type
 
 Total number of coleoptera species per trap type
 -----------
@@ -590,7 +676,7 @@ to_plot <- rbind(temp_1, temp_2) %>%
   ungroup() %>% 
   mutate(trap_type = factor(trap_type),
          species_latin = factor(species_latin),
-         facet = rep(c(1, 2, 3, 4), times = c(57, 57, 57, 56)))
+         facet = rep(c(1, 2, 3, 4), times = c(61, 60, 60, 60)))
 ```
 
 
@@ -691,8 +777,7 @@ col_perc_traptype %>%
 
 Figs to Niclas on Pollinators
 ============
-Niclas Gyllenstrand asked how efficient the malaisetraps+metabarcoding are at finding pollinators. This could be a relevant graph for the report as well.
-
+Niclas Gyllenstrand at NRM asked how efficient the malaisetraps + metabarcoding are at finding pollinators. This could be a relevant graph for the report as well.
 
 
 ```{r}
@@ -727,9 +812,9 @@ ggplot(poll_spec_richn, aes(x = family, y = col_spec_richn, label = col_spec_ric
   geom_text(size = 3,
             position = position_nudge(y = 4)) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-    scale_fill_nina(name = "Family") +
+    scale_fill_nina(name = "Familje") +
   xlab("") +
-  ylab("Number of species")
+  ylab("Antall arter")
 ```
 
 
@@ -795,44 +880,112 @@ seasonAvgNo <- dat %>%
 ```
 
 ```{r no_spec_phenology_forest}
-seasonAvgNo %>% 
-  filter(habitat_type == "Skog") %>% 
-ggplot() +
-  geom_point(aes(x = date_emptied, y = no_species, color = locality)) +
-  geom_line(aes(x = date_emptied, y = no_species, color = locality)) +
+to_plot <- seasonAvgNo %>% 
+  filter(habitat_type == "Skog")
+
+to_annotate <- to_plot %>% 
+  group_by(locality) %>% 
+  arrange(date_emptied) %>% 
+  filter(row_number()==1)
+
+ggplot(to_plot) +
+    geom_line(aes(x = date_emptied, 
+                y = no_species, 
+                color = locality),
+                lwd = 0.75) +
+  geom_point(aes(x = date_emptied, 
+                 y = no_species, 
+                 color = locality),
+                 size = 2.5) +
+  geom_text_repel(data = to_annotate, 
+             aes(x = date_emptied, 
+                 y = no_species, 
+                 label = locality, 
+                 family = "mono")) +
   ylab("Antall taksa") +
   xlab("Tømmedato") +
   scale_color_nina(name = "Lokalitet")
 ```
 
 ```{r no_spec_phenology_grassland}
-seasonAvgNo %>% 
-  filter(habitat_type == "SN_Gressmark") %>% 
-ggplot() +
-  geom_point(aes(x = date_emptied, y = no_species, color = locality)) +
-  geom_line(aes(x = date_emptied, y = no_species, color = locality)) +
+to_plot <- seasonAvgNo %>% 
+  filter(habitat_type == "SN_Gressmark")
+
+to_annotate <- to_plot %>% 
+  group_by(locality) %>% 
+  arrange(date_emptied) %>% 
+  filter(row_number()==1 )
+
+ggplot(to_plot) +
+  geom_line(aes(x = date_emptied, 
+                y = no_species, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = date_emptied, 
+                 y = no_species, 
+                 color = locality),
+             size = 2.5) +
+  geom_text_repel(data = to_annotate, 
+             aes(x = date_emptied, 
+                 y = no_species, 
+                 label = locality, 
+                 family = "mono")) +
   ylab("Antall taksa") +
   xlab("Tømmedato") +
   scale_color_nina(name = "Lokalitet")
 ```
 
 ```{r biomass_phenology_forest}
-seasonAvgNo %>% 
-  filter(habitat_type == "Skog") %>% 
-ggplot() +
-  geom_point(aes(x = date_emptied, y = sum_biomass, color = locality)) +
-  geom_line(aes(x = date_emptied, y = sum_biomass, color = locality)) +
+to_plot <- seasonAvgNo %>% 
+  filter(habitat_type == "Skog")
+
+to_annotate <- to_plot %>% 
+  group_by(locality) %>% 
+  arrange(date_emptied) %>% 
+  filter(row_number()== 1)
+
+ggplot(to_plot) +
+  geom_line(aes(x = date_emptied, 
+                y = sum_biomass, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = date_emptied, 
+                 y = sum_biomass, 
+                 color = locality),
+             size = 2.5) +
+  geom_text_repel(data = to_annotate, 
+             aes(x = date_emptied, 
+                 y = sum_biomass, 
+                 label = locality, 
+                 family = "mono")) +
   ylab("Total innsamlet biomasse (våtvekt g., pluss flaske)") +
   xlab("Tømmedato") +
   scale_color_nina(name = "Lokalitet")
 ```
 
 ```{r biomass_phenology_grassland}
-seasonAvgNo %>% 
-  filter(habitat_type == "SN_Gressmark") %>% 
-ggplot() +
-  geom_point(aes(x = date_emptied, y = sum_biomass, color = locality)) +
-  geom_line(aes(x = date_emptied, y = sum_biomass, color = locality)) +
+to_plot <- seasonAvgNo %>% 
+  filter(habitat_type == "SN_Gressmark") 
+
+to_annotate <- to_plot %>% 
+  group_by(locality) %>% 
+  arrange(date_emptied) %>% 
+  filter(row_number()== 1)
+
+ggplot(to_plot) +
+  geom_line(aes(x = date_emptied, 
+                y = sum_biomass, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = date_emptied, 
+                 y = sum_biomass, 
+                 color = locality),
+             size = 2.5) +
+  geom_text_repel(data = to_annotate, 
+             aes(x = date_emptied, 
+                 y = sum_biomass, 
+                 label = locality, 
+                 family = "mono")) +
   ylab("Total innsamlet biomasse (våtvekt g. pluss flaske)") +
   xlab("Tømmedato") +
   scale_color_nina(name = "Lokalitet")
@@ -888,96 +1041,6 @@ tt %>%
   
 ```
 
-
-
-
-<!-- What happens if we only take the day time values? -->
-<!-- ```{r dew_point_group_day} -->
-<!-- logger_data %>%  -->
-<!--       filter(day >= '2020-07-01' & -->
-<!--          day < '2020-08-01') %>% -->
-<!--       collect() %>%  -->
-<!--   mutate(time = as_hms(date)) %>%  -->
-<!--   filter(time >= as_hms("12:00:00") & -->
-<!--            time < as_hms("18:00:00")) %>%  -->
-<!--   filter(data_type == "dew") %>%  -->
-<!--   group_by(location) %>%  -->
-<!--   summarize(value = mean(value)) %>%  -->
-<!--   mutate(location = factor(location, levels = c(paste0("Semi-nat_", 1:10), paste0("Skog_", 1:10)))) %>%  -->
-<!--     left_join(location_groups, -->
-<!--             by = c("location" = "location")) %>%  -->
-<!--   ggplot(.) + -->
-<!--   geom_bar(aes(x = location, y = value, fill = location_group), stat = "identity") + -->
-<!--   scale_fill_nina(name = "Location group") + -->
-<!--   xlab("Location") + -->
-<!--   ylab("Average dew point in July") + -->
-<!--   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  -->
-
-<!-- ``` -->
-
-<!-- Check correspondance with altitude -->
-<!-- ------------ -->
-
-<!-- ```{r} -->
-<!-- location_alt_q <- " -->
-<!-- SELECT location, avg(ST_Z(geom)) avg_altitude -->
-<!-- FROM traps.trap_locations -->
-<!-- WHERE elev_data IS TRUE -->
-<!-- GROUP BY location -->
-<!-- " -->
-<!-- location_alt <- dbGetQuery(con, location_alt_q) -->
-
-<!-- ``` -->
-
-<!-- ```{r dew_point_alt} -->
-<!-- logger_data %>%  -->
-<!--     filter(day >= '2020-10-01' & -->
-<!--          day < '2020-11-01') %>%  -->
-<!--   group_by(location, data_type) %>%  -->
-<!--   summarize(value = mean(value)) %>%  -->
-<!--   filter(data_type == "dew") %>%  -->
-<!--   collect() %>%  -->
-<!--   mutate(location = factor(location, levels = c(paste0("Semi-nat_", 1:10), paste0("Skog_", 1:10)))) %>%  -->
-<!--     left_join(location_groups, -->
-<!--             by = c("location" = "location")) %>%  -->
-<!--   left_join(location_alt, -->
-<!--             by = c("location" = "location")) %>%  -->
-<!--   filter(!is.na(avg_altitude)) %>%  -->
-<!--   ggplot(.) + -->
-<!--   geom_bar(aes(x = avg_altitude, y = value, fill = location_group), stat = "identity") + -->
-<!--   scale_fill_nina(name = "Lokalitets-gruppe") + -->
-<!--   xlab("Lokalitets-altitud") + -->
-<!--   ylab("Middels duggpunkt i Juli") + -->
-<!--   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  -->
-
-
-<!-- ``` -->
-
-<!-- The dew points seem to correspond quite well with the altitude,  -->
-
-<!-- ```{r rh_point_alt} -->
-<!-- logger_data %>%  -->
-<!--     filter(day >= '2020-10-01' & -->
-<!--          day < '2020-11-01') %>%  -->
-<!--   group_by(location, data_type) %>%  -->
-<!--   summarize(value = mean(value)) %>%  -->
-<!--   filter(data_type == "rh") %>%  -->
-<!--   collect() %>%  -->
-<!--   mutate(location = factor(location, levels = c(paste0("Semi-nat_", 1:10), paste0("Skog_", 1:10)))) %>%  -->
-<!--     left_join(location_groups, -->
-<!--             by = c("location" = "location")) %>%  -->
-<!--   left_join(location_alt, -->
-<!--             by = c("location" = "location")) %>%  -->
-<!--   filter(!is.na(avg_altitude)) %>%  -->
-<!--   ggplot(.) + -->
-<!--   geom_bar(aes(x = avg_altitude, y = value, fill = location_group), stat = "identity") + -->
-<!--   scale_fill_nina(name = "Lokalitets-gruppe") + -->
-<!--   xlab("Lokalitets-altitud") + -->
-<!--   ylab("Middels duggpunkt i Juli") + -->
-<!--   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  -->
-
-
-<!-- ``` -->
 
 
 
@@ -1142,7 +1205,7 @@ comp_species_week <- no_species_weeks %>%
               values_from = no_species,
               names_prefix = "sample_time_") %>% 
   mutate(diff_sample_time = sample_time_4 - sample_time_2,
-         prc_diff_sample_time = (sample_time_4 - sample_time_2) / sample_time_2)
+         prc_diff_sample_time = 100 *  (sample_time_4 - sample_time_2) / sample_time_2)
 ```
 
 Quality check of a few rows. Seems OK.
@@ -1197,11 +1260,17 @@ comp_species_week %>%
   group_by(locality) %>% 
   filter(trap_type == "Malaise") %>% 
   ggplot(.) +
-  geom_point(aes(x = empty_week, y = diff_sample_time, color = locality)) +
-  geom_line(aes(x = empty_week, y = diff_sample_time, color = locality)) +
+  geom_line(aes(x = empty_week, 
+                y = diff_sample_time, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = empty_week, 
+                 y = diff_sample_time, 
+                 color = locality),
+             size = 2.5) + 
   scale_color_nina(name = "Lokalitet") +
   ylab("Diff. kumulativ 2 uker - 4 uker (no. taksa)") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) +
   theme(legend.key.height = unit(0.5, "cm"))
 
@@ -1213,11 +1282,17 @@ comp_species_week %>%
   group_by(locality) %>% 
   filter(trap_type == "Malaise") %>% 
   ggplot(.) +
-  geom_point(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) + 
-  geom_line(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
+  geom_line(aes(x = empty_week, 
+                y = prc_diff_sample_time, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = empty_week, 
+                 y = prc_diff_sample_time, 
+                 color = locality),
+             size = 2.5) + 
   scale_color_nina(name = "Lokalitet") +
   ylab("% Diff. kumulativ 2 uker - 4 uker") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) +
   theme(legend.key.height = unit(0.5, "cm"))
 
@@ -1229,11 +1304,17 @@ comp_species_week %>%
   group_by(locality) %>% 
   filter(trap_type == "Vindu") %>% 
   ggplot(.) +
-  geom_point(aes(x = empty_week, y = diff_sample_time, color = locality)) +
-  geom_line(aes(x = empty_week, y = diff_sample_time, color = locality)) +
+  geom_line(aes(x = empty_week, 
+                y = diff_sample_time, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = empty_week, 
+                 y = diff_sample_time, 
+                 color = locality),
+             size = 2.5) + 
   scale_color_nina(name = "Lokalitet") +
   ylab("Diff. kumulativ 2 uker - 4 uker") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) 
 
 ```
@@ -1243,11 +1324,17 @@ comp_species_week %>%
   group_by(locality) %>% 
   filter(trap_type == "Vindu") %>% 
   ggplot(.) +
-  geom_point(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
-  geom_line(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
+  geom_line(aes(x = empty_week, 
+                y = prc_diff_sample_time, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = empty_week, 
+                 y = prc_diff_sample_time, 
+                 color = locality),
+             size = 2.5) + 
   scale_color_nina(name = "Lokalitet") +
   ylab("% Diff. kumulativ 2 uker - 4 uker") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) 
 
 ```
@@ -1306,7 +1393,7 @@ biomass_comp <- biomass_agg_data_2_week %>%
                    "trap_type" = "trap_type"),
             suffix = c("_2_weeks", "_4_weeks")) %>% 
   mutate(diff_sample_time = biomass_4_weeks - biomass_2_weeks,
-         prc_diff_sample_time = (biomass_4_weeks - biomass_2_weeks) / biomass_2_weeks)
+         prc_diff_sample_time = 100 * (biomass_4_weeks - biomass_2_weeks) / biomass_2_weeks)
   
   
 ```
@@ -1317,11 +1404,17 @@ biomass_comp %>%
   group_by(locality) %>% 
   filter(trap_type == "Malaise") %>% 
   ggplot(.) +
-  geom_point(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
-  geom_line(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
+  geom_line(aes(x = empty_week, 
+                y = prc_diff_sample_time, 
+                color = locality),
+            lwd = 0.75) +
+  geom_point(aes(x = empty_week, 
+                 y = prc_diff_sample_time, 
+                 color = locality),
+             size = 2.5) +
   scale_color_nina(name = "Lokalitet") +
   ylab("% Diff. kumulativ 2 uker - 4 uker") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) +
   theme(legend.key.height = unit(0.5, "cm"))
 ```
@@ -1396,7 +1489,7 @@ biomass_comp %>%
   geom_line(aes(x = empty_week, y = prc_diff_sample_time, color = locality)) +
   scale_color_nina(name = "Lokalitet") +
   ylab("% Diff. kumulativ 2 uker - 4 uker") +
-  xlab("Tømmingsuke, 4 ukerstømming") +
+  xlab("Tømmingsuke") +
   geom_hline(yintercept = 0) +
   theme(legend.key.height = unit(0.5, "cm"))
 
@@ -1405,6 +1498,7 @@ biomass_comp %>%
 
 Compare the ethanol to the propglykol window traps
 ===============
+Quick analysis.
 
 ```{r}
 liquid_comp <- dat %>% 
@@ -1423,7 +1517,7 @@ liquid_comp
 
 ```{r}
 
-liquid_mod_0 <- glmer(no_species ~ liquid * weeks_sampled + (1|empty_week) + (1 | locality), 
+liquid_mod_0 <- glmer(no_species ~ liquid * weeks_sampled + (1| sample_id) + (1 | empty_week) + (1 | locality), 
                       family = "poisson",
                       data = liquid_comp)
 
@@ -1431,8 +1525,28 @@ isSingular(liquid_mod_0)
 
 summary(liquid_mod_0)
 ```
+```{r}
+overdisp_fun <- function(model) {
+    rdf <- df.residual(model)
+    rp <- residuals(model,type="pearson")
+    Pearson.chisq <- sum(rp^2)
+    prat <- Pearson.chisq/rdf
+    pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+    c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+liquid_mod_1 <- glmer(no_species ~ liquid * weeks_sampled + (1 | empty_week) + (1 | locality), 
+                      family = "poisson",
+                      data = liquid_comp)
 
-I struggle to model this with all the random effect I would like. I'm not able to include a id level random effect to account for overdispersion for example. Anyway, the results give an indication of the differences in the data.
+isSingular(liquid_mod_1)
+
+summary(liquid_mod_1)
+
+overdisp_fun(liquid_mod_1)
+overdisp_fun(liquid_mod_0)
+
+```
+
 
 ```{r}
 liquid_pred <- ggpredict(liquid_mod_0,
@@ -1448,11 +1562,9 @@ plot(liquid_pred) +
   xlab("Væske i vindusfelle")
 ```
 
-Ano-registations
+Ano-registrations
 =======
 Here is some simple graphs of the ANO measurements at the locations.
-IKKE KLAR, gjør bedre fargeskala
-
 
 
 ```{r}
@@ -1531,23 +1643,49 @@ tree_plots <- tbl(con,
 
 trap_loc <- tbl(con, 
                 in_schema("traps", "locations"))
+
+tree_spec <- tbl(con,
+                 in_schema("landsskog", "tree_species"))
 ```
 
 
 ```{r}
 tree_spec <- tree_reg %>% 
   left_join(tree_plots,
-            by = c("parent_id" = "id")) %>% 
+            by = c("parent_id" = "id")) %>%  
+  left_join(tree_spec,
+            by = c("treslag_kode" = "treslag_kode")) %>% 
   left_join(trap_loc,
             by = c("ano_flate_id" = "ano_flate_id"))
 
 ```
+Which tree got age determined?
+```{r}
+tree_spec %>% 
+  select(location, treslag, boniteringstre) %>%  
+  arrange(location) %>% 
+  print(n = Inf)
+```
+
 
 ```{r}
+dom_tree <- tree_spec %>% 
+  group_by(location,
+           treslag) %>% 
+  summarise(no_trees = n()) %>%  
+  collect() %>% 
+  arrange(location,
+          desc(no_trees)) %>% 
+ slice_min(1) %>% 
+  select(dom_tree = treslag,
+         -no_trees)
+
 tree_agg <- tree_spec %>% 
-  group_by(location) %>% 
-  summarize(no_spec = as.character(n_distinct(treslag)),
-            avg_age = mean(alder, na.rm = T)) %>% 
+  collect() %>% 
+  left_join(dom_tree,
+            by = c("location" = "location")) %>% 
+  group_by(location, dom_tree) %>% 
+  summarize(avg_age = mean(alder, na.rm = T)) %>% 
   collect() %>% 
   mutate(location = factor(location, levels = paste0("Skog_", 1:10)))
 ```
@@ -1555,8 +1693,8 @@ tree_agg <- tree_spec %>%
 ```{r tree_spec}
 tree_agg %>% 
   ggplot(.) +
-  geom_bar(aes(x = location, y = avg_age, fill = no_spec), stat = "identity") +
-  scale_fill_nina(name = "Antall treslag",
+  geom_bar(aes(x = location, y = avg_age, fill = dom_tree), stat = "identity") +
+  scale_fill_nina(name = "Dominerende treslag",
                   discrete = T,
                   palette = "darkblue-orange") +
   ylab("Middelalder på de 2 største treene") +

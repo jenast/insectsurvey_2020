@@ -24,7 +24,7 @@ output:
 require(tidyverse)
 require(DBI)
 require(RPostgres)
-require(RPostgreSQL)
+#require(RPostgreSQL)
 require(ggplot2)
 require(xtable)
 require(NinaR)
@@ -1834,7 +1834,7 @@ landsskog_data <- read.xlsx("../../Data/Landsskogstaksering/landskog_punching_JÃ
 
 landsskog_data
 ```
-!!NOT DONE, continue formatting and make db-table
+
 
 ```{r}
 landsskog_data <- landsskog_data %>% 
@@ -1845,7 +1845,7 @@ landsskog_data <- landsskog_data %>%
   select(id,
          parent_id,
          tre_nummer = Tre.nummer,
-         treslag = Treslag,
+         treslag_kode = Treslag,
          diameter_breast_height = DBH,
          tilstand = Tilstand,
          kommentar = Kommentar,
@@ -1865,7 +1865,7 @@ CREATE TABLE landsskog.survey_data (
 id uuid PRIMARY KEY,
 parent_id uuid,
 tre_nummer integer,
-treslag integer,
+treslag_kode integer,
 diameter_breast_height double precision,
 tilstand integer,
 kommentar text,
@@ -1886,7 +1886,7 @@ dbSendStatement(con, "DROP TABLE IF EXISTS landsskog.survey_data;")
 dbSendStatement(con, create_landsskog_data)
 
 dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(parent_id);")
-dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(treslag);")
+dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(treslag_kode);")
 dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(hoydetre);")
 dbSendStatement(con, "CREATE INDEX ON landsskog.survey_data USING BTREE(boniteringstre);")
 
@@ -1900,6 +1900,44 @@ dbSendStatement(con, "DELETE FROM landsskog.survey_data;")
 dbWriteTable(con,
              Id(schema = "landsskog", table = "survey_data"),
              landsskog_data,
+             append = T)
+```
+
+Tree-codes
+```{r}
+tree_codes <- read_csv("../../Data/Landsskogstaksering/trekoder.txt") %>% 
+  select(treslag = TRESLAG,
+         treslag_kode = SKJEMAKODE,
+         treslag_definisjon = DEFINISJON) %>% 
+  mutate(treslag = str_to_title(treslag))
+tree_codes %>% print(n = Inf)
+
+```
+
+```{r, eval = F}
+
+create_landsskog_treslag <- "
+CREATE TABLE landsskog.tree_species (
+id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+treslag text,
+treslag_kode integer,
+treslag_definisjon text
+);
+"
+
+dbSendStatement(con, "DROP TABLE IF EXISTS landsskog.tree_species;")
+
+dbSendStatement(con, create_landsskog_treslag)
+
+dbSendStatement(con, "CREATE INDEX ON landsskog.tree_species USING BTREE(treslag);")
+
+
+```
+```{r, eval = F}
+
+dbWriteTable(con,
+             Id(schema = "landsskog", table = "tree_species"),
+             tree_codes,
              append = T)
 ```
 
