@@ -1705,6 +1705,38 @@ tree_agg %>%
 
 
 
+Glyphosate figure
+=========
+A simple figure of the sales statistics of glyphosate in Norway
+
+
+```{r}
+herb_pest_data <- read_csv("../../Data/Plantevern/glyphosate_neonic.csv")
+```
+
+```{r, glyphosate_trend}
+herb_pest_data %>% 
+  filter(type == "glyfosat") %>% 
+  ggplot(.) +
+  geom_line(aes(x = year, y = amount, color = type), lwd = 1) +
+  scale_color_nina(name = "Stoff") +
+  ylab("Salgsstatistikk i Norge (kg)") +
+  xlab("År")
+  
+```
+
+```{r, imidakloprid_trend}
+herb_pest_data %>% 
+  filter(type == "imidakloprid") %>% 
+  ggplot(.) +
+  geom_line(aes(x = year, y = amount, color = type), lwd = 1) +
+  scale_color_nina(name = "Stoff") +
+  ylab("Salgsstatistikk i Norge (kg)") +
+  xlab("År")
+  
+```
+
+
 
 
 
