@@ -17,7 +17,10 @@ output:
  - split norwegian and latin into separate columns
  - fix my manually entered names into correct latin names
 
-* Add landskogstaksering
+
+
+* Add main data
+
  
 ```{r, include = F}
 #Some common packages, loading rmarkdown doesn't like the messages from tidyverse, so we don't include this in the document'
@@ -62,7 +65,7 @@ palette(ninaPalette())
 source("~/.rpgpass")
 #This connects to the gisdatabase with a DBI connection named `con`.
 #Use for example dbGetQuery(con, "SELECT * FROM ....") to query the database
-dbDisconnect(conn = con)
+dbDisconnect(con)
 con <- dbConnect(Postgres(), 
                  dbname = "insect_monitoring",
                  host = "ninradardata01.nina.no",
@@ -98,10 +101,10 @@ trap_loc <- trap_loc %>%
 ```
 ```{r}
 
-dbSendQuery(con, "DROP TABLE IF EXISTS traps.trap_locations;")
+dbSendQuery(con, "DROP TABLE IF EXISTS locations.trap_locations;")
 
 create_trap_loc_q <- "
-CREATE TABLE traps.trap_locations (
+CREATE TABLE locations.trap_locations (
 id serial PRIMARY KEY,
 location text NOT NULL,
 year integer NOT NULL,
@@ -119,7 +122,7 @@ dbSendQuery(con, create_trap_loc_q)
 
 ```{r}
 
-dbSendQuery(con, "CREATE INDEX ON traps.trap_locations USING GIST(geom);")
+dbSendQuery(con, "CREATE INDEX ON locations.trap_locations USING GIST(geom);")
 ```
 
 
@@ -161,21 +164,24 @@ loc <- read_delim("../../Data/trap_locations/locations_2020.csv",
 loc <- loc %>% 
   mutate(year = 2020) %>% 
   select(location = locality,
+         habitat_type,
          year,
-         ano_flate_id)
+         ano_flate_id, 
+         ssbid)
 
 ```
 ```{r}
 
-dbSendQuery(con, "DROP TABLE IF EXISTS traps.locations;")
+dbSendQuery(con, "DROP TABLE IF EXISTS locations.locations;")
 
 create_loc_q <- "
-CREATE TABLE traps.locations (
+CREATE TABLE locations.locations (
 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 location text NOT NULL,
+habitat_type text NOT NULL,
 year integer NOT NULL,
-ano_flate_id text NOT NULL
-
+ano_flate_id text,
+ssbid bigint NOT NULL
 )
 
 "
@@ -186,14 +192,16 @@ dbSendQuery(con, create_loc_q)
 
 ```{r}
 
-dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(location);")
-dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(ano_flate_id);")
-dbSendQuery(con, "CREATE INDEX ON traps.locations USING BTREE(year);")
+dbSendQuery(con, "CREATE INDEX ON locations.locations USING BTREE(location);")
+dbSendQuery(con, "CREATE INDEX ON locations.locations USING BTREE(ano_flate_id);")
+dbSendQuery(con, "CREATE INDEX ON locations.locations USING BTREE(habitat_type);")
+dbSendQuery(con, "CREATE INDEX ON locations.locations USING BTREE(ssbid);")
+dbSendQuery(con, "CREATE INDEX ON locations.locations USING BTREE(year);")
 ```
 
 ```{r, eval = F}
 dbWriteTable(con, 
-             Id(schema = "traps", table = "locations"),
+             Id(schema = "locations", table = "locations"),
              loc,
              append = T)
 ```
@@ -451,7 +459,7 @@ dbSendStatement(con, "CREATE INDEX ON ano.ano_10000 USING BTREE(anoid);")
 
 ```
 
-Add table with ANO point offsets. This has a logic to it, got the recipee from Vegard B I think.
+Add table with ANO point offsets. This has a logic to it, got the recipe from Vegard B I think.
 
 ```{r}
 ano_offsets <- read_csv("../../GIS/Feltlok_2020/ANO/AKO_punkt_offset/ako_point_offset.csv") %>% 
@@ -1709,7 +1717,7 @@ bottle_weights <- read_delim("../../Data/Genetikkdata/Tomflaske_vekter.csv",
                              delim = ";",)
 
 bottle_weights <- bottle_weights %>% 
-  mutate(year = 2000)
+  mutate(year = 2020)
 
 ```
 
@@ -1940,5 +1948,1334 @@ dbWriteTable(con,
              tree_codes,
              append = T)
 ```
+
+Import catch data to database
+=========
+This has some add-hoc corrections that is specific to this data set.
+
+
+
+```{r import_csv}
+
+dat <- read_delim("../../Data/Genetikkdata/long_format_data_GCF-2020-735_736_743_744_748_23112020.txt", 
+                  delim= ";",
+                  na = c("NA",
+                         "N/A",
+                         "Maa veies",
+                         "Smaa flasker maa veies"),
+                 col_types = cols(
+  kingdom = col_character(),
+  phylum = col_character(),
+  class = col_character(),
+  order = col_character(),
+  family = col_character(),
+  genus = col_character(),
+  species = col_character(),
+  sample = col_character(),
+  value = col_double(),
+  GenlabID = col_character(),
+  GUID = col_character(),
+  mottatt_lab = col_character(),
+  locality = col_character(),
+  trap = col_character(),
+  date_placed = col_date(format = "%d.%m.%Y"),
+  time_placed = col_time(format = ""),
+  empty_week = col_double(),
+  date_emptied = col_date(format = "%d.%m.%Y"),
+  time_emptied = col_time(format = ""),
+  liquid = col_character(),
+  person_emptied = col_character(),
+  sample_id = col_character(),
+  comment = col_character(),
+  Tilsatt_antall_C.analis_SI_USA_08.06.20 = col_double(),
+  Tilsatt_antall_C.chinensis_08.06.20 = col_double(),
+  Tilsatt_antall_Sirisser = col_double(),
+  Tilsatt_antall_Melormer = col_double(),
+  Tilsatt_antall_C.maculatus = col_double(),
+  Vekt_tom_flaske_.g. = col_double(),
+  Vekt_flaske_med_EtOH_og_insekter_.g. = col_double(),
+  Vekt_flaske_._insekter_vaat_.g. = col_double(),
+  Vekt_flaske_._insekter_toerr_.g. = col_double(),
+  Totalvolum_.mengde_ATL_._prot.K_mL. = col_double(),
+  Vaatvekt_.g. = col_double(),
+  Toerrvekt_.g. = col_double(),
+  Kommentar_proeve = col_character(),
+  Ekstraksjonsdato = col_date(format = "%d.%m.%Y"),
+  Ekstraksjonskit = col_character(),
+  Subsamplet_volum_.ul. = col_double(),
+  Elueringsvolum = col_double(),
+  OD = col_double(),
+  X260_280 = col_double(),
+  X260_230 = col_double(),
+  Labperson = col_character(),
+  Ekstraksjonskommentar = col_character(),
+  kommentar_genlab = col_character(),
+  run = col_character(),
+  taxonomic_level = col_character(),
+  identification_confidence = col_character(),
+  possible_marker_issue = col_logical(),
+  probable_database_insufficiency = col_logical(),
+  norsk = col_logical(),
+  antall_arter_i_norge = col_double(),
+  antall_norsk_arter_i_db = col_double(),
+  pct_db_coverage = col_double()
+)
+)
+
+
+```
+```{r, eval = F, echo = F}
+spec(dat)
+```
+
+Fix some coding issues.
+```{r fix_coding}
+# dat %>% 
+#   select(genus, species, new_species) %>% 
+# slice(297, 1902)
+#   
+# 
+# dat %>% 
+#   select(genus, species, new_species) %>% 
+# slice(3219, 3585, 4017, 11424, 13275, 15465, 21056, 24168, 25077, 31567, 32805, 48502, 49967)
+#   
+#Ekstraksjonskommentar = gsub(pattern = "[\\\"]", "", Ekstraksjonskommentar),
+
+dat <- dat %>% 
+  mutate(species_latin = species)
+
+dat <- dat %>% 
+  mutate(species = gsub(" sp", "_sp", species))
+
+dat <- dat %>% 
+  mutate(species = gsub("([0-9])(_)(sp)", "\\1/\\3", species))
+
+dat <- dat %>%
+  mutate(species = gsub("(.*)(_)(.*)", "\\3", species))
+
+dat <- dat %>% 
+  mutate(locality = str_to_sentence(locality))
+
+```
+
+Change spelling to norwegian
+---------
+
+```{r}
+dat <- dat %>% 
+  mutate(locality = ifelse(locality == "Nerlandsoeya", "Nerlandsøya", locality))
+```
+
+!!Not done
+Fix trap names from M1 to MF1
+
+Set factor levels
+
+```{r}
+dat <- dat %>%
+  mutate(locality = factor(locality, levels = c(paste0("Semi-nat_", 1:10), paste0("Skog_", 1:10), "Nerlandsøya")),
+         trap_type = ifelse(grepl("MF", trap), "Malaise", "Vindu"),
+         habitat_type = ifelse(grepl("Skog", locality), "Skog", "SN_Gressmark"),
+         liquid = ifelse(grepl("etoh85", liquid), "Ethanol", "PropGl_Ethanol"),
+         weeks_sampled = ifelse(grepl("1", trap) | grepl("3", trap), 2, 4)
+         )
+```
+
+
+
+Add missing bottle weights. This is based on a sample of bottle dry weight measurements made after the regular weighings. 
+
+```{r}
+bottle_weights <- tbl(con,
+                   in_schema("catch_data", "bottle_weights")) %>% 
+  select(-id)
+
+
+# bottle_weights %>% 
+#   filter(bottle_type == "MF" & year == 2000) %>% 
+#   select(dry_weight) %>% 
+#   ggplot(.) +
+#   geom_density(aes(x = dry_weight))
+
+bottle_weights_MF <- bottle_weights %>% 
+  filter(bottle_type == "MF" & year == 2000) %>% 
+  select(dry_weight) %>% 
+  summarize(mean_weight = mean(dry_weight)) %>% 
+  collect()
+
+
+bottle_weights_VF_stor <- bottle_weights %>% 
+  filter(bottle_type == "VF_stor" & year == 2000) %>% 
+  select(dry_weight) %>% 
+  summarize(mean_weight = mean(dry_weight)) %>% 
+  collect()
+
+bottle_weights_VF_liten <- bottle_weights %>% 
+  filter(bottle_type == "VF_liten" & year == 2000) %>% 
+  select(dry_weight) %>% 
+  summarize(mean_weight = mean(dry_weight)) %>% 
+  collect()
+
+```
+Add mean bottle weights for the missing MF bottles. 
+```{r}
+sum(is.na(dat$Vekt_tom_flaske_.g.))
+dat <- dat %>% 
+  mutate(Vekt_tom_flaske_.g. = ifelse(trap_type == "Malaise" & is.na(Vekt_tom_flaske_.g.), bottle_weights_MF$mean_weight, Vekt_tom_flaske_.g.))
+   
+sum(is.na(dat$Vekt_tom_flaske_.g.))
+```
+
+The window traps is a little bit trickier, since we might use different bottle sizes. We have to add the big bottle weights to the samples that plausibly used big bottles, i.e. dry weights around the big bottle weights. Here we use a cutoff for the bottle types of 50 grams.
+
+```{r}
+dat <- dat %>% 
+  mutate(Vekt_tom_flaske_.g. = ifelse(trap_type == "Vindu" & is.na(Vekt_tom_flaske_.g.) & Vekt_flaske_._insekter_toerr_.g. > 50, bottle_weights_VF_stor$mean_weight, Vekt_tom_flaske_.g.))
+sum(is.na(dat$Vekt_tom_flaske_.g.))
+```
+
+Add the small bottle weights.
+```{r}
+dat <- dat %>% 
+  mutate(Vekt_tom_flaske_.g. = ifelse(trap_type == "Vindu" & is.na(Vekt_tom_flaske_.g.) & Vekt_flaske_._insekter_toerr_.g. < 50, bottle_weights_VF_liten$mean_weight, Vekt_tom_flaske_.g.))
+sum(is.na(dat$Vekt_tom_flaske_.g.))
+```
+
+
+```{r}
+dat <- dat %>% 
+     mutate(Vaatvekt_.g. = Vekt_flaske_._insekter_vaat_.g. - Vekt_tom_flaske_.g.,
+            Toerrvekt_.g. = Vekt_flaske_._insekter_toerr_.g. - Vekt_tom_flaske_.g.)
+```
+
+Fix some dates
+
+```{r}
+dat %>% 
+  filter(date_placed < "2020-01-01")
+```
+
+
+Add the missing Nerlandsøya data (earlier versions was lacking this at least.)
+
+```{r}
+dat <- dat %>% 
+  mutate(date_placed = replace(date_placed, (locality == "Nerlandsøya" &
+           date_emptied == "2020-06-13"), "2020-05-22"))
+
+dat <- dat %>% 
+  mutate(date_placed = replace(date_placed, (locality == "Nerlandsøya" &
+           date_emptied == '2020-06-30'), '2020-06-13'))
+
+dat <- dat %>% 
+  mutate(sample_id = ifelse((locality == "Nerlandsøya" &
+           date_emptied == '2020-06-13'), 'nerlandsøya_MF1_week_24', sample_id))
+
+dat <- dat %>% 
+  mutate(sample_id = ifelse((locality == "Nerlandsøya" &
+           date_emptied == '2020-06-30'), 'nerlandsøya_MF1_week_27', sample_id))
+
+dat %>% 
+  select(date_placed) %>% 
+  distinct()
+
+dat %>% 
+  filter(locality == "Nerlandsøya" &
+           date_emptied == '2020-06-13') %>% 
+  select(date_placed)
+```
+
+
+
+
+Check the emptying dates.
+----------------
+The dates seems to be OK this time. Should do a proper check on the endpoints though.
+```{r}
+dat <- dat %>% 
+  mutate(days_collected = as.numeric(dat$date_emptied - dat$date_placed))
+
+# dat %>% 
+#   filter(days_collected == 0) %>% 
+#   select(sample_id,
+#          GUID,
+#          date_placed,
+#          date_emptied) %>% 
+#   distinct() %>% 
+#   print(n = Inf)
+# 
+# hist(as.numeric(dat$date_emptied - dat$date_placed))
+```
+
+<!-- These traps have erroneous placement dates. -->
+<!-- ```{r} -->
+<!-- dat %>%  -->
+<!--   filter(sample_id == "skog_1_MF1_week_") %>%  -->
+<!--   slice(1:2) %>%  -->
+<!--   print(width = Inf) -->
+
+<!-- dat %>%  -->
+<!--   filter(sample_id == "skog_1_MF1_week_26") -->
+<!-- ``` -->
+
+```{r}
+
+dat %>% 
+  group_by(days_collected) %>% 
+  summarise(n())
+
+# dat %>% 
+#   filter(days_collected == 8) %>% 
+#   select(sample_id,
+#          GUID,
+#          date_placed,
+#          date_emptied) %>% 
+#   distinct() %>% 
+#   print(n = Inf)
+```
+
+Fix a few typing errors in the dates. This is updated now in the sources, and should be fixed in the next data version.
+
+```{r}
+dat %>% 
+  filter(days_collected <1) %>% 
+  select(locality, sample_id, trap, date_placed, date_emptied) %>% 
+  distinct()
+```
+```{r}
+dat <- dat %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_2_MF1_week_34", as.Date("2020-08-05"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_2_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_emptied = replace(date_emptied, sample_id == "semi-nat_6_MF1_week_34", as.Date("2020-08-19"))) %>% 
+  mutate(date_emptied = replace(date_emptied, sample_id == "semi-nat_6_MF2_week_34", as.Date("2020-08-19"))) %>%  
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_7_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "semi-nat_8_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_MF1_week_36", as.Date("2020-08-18"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_VF1_week_36", as.Date("2020-08-18")))  %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_10_VF3_week_36", as.Date("2020-08-18")))  %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_MF1_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_VF1_week_36", as.Date("2020-08-19")))%>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_5_VF3_week_36", as.Date("2020-08-19"))) %>% 
+  mutate(date_placed = replace(date_placed, sample_id == "skog_8_MF1_week_36", as.Date("2020-08-18"))) 
+
+```
+
+
+```{r}
+dat <- dat %>% 
+  mutate(days_collected = as.numeric(dat$date_emptied - dat$date_placed))
+```
+
+```{r}
+dat %>% 
+  filter(days_collected <1) %>% 
+  select(locality, sample_id, trap, date_placed, date_emptied) %>% 
+  distinct()
+```
+
+Check the NA values for days_collected. Only the Nerlandsøya samples lacks some data.
+```{r}
+dat %>% 
+  filter(is.na(days_collected)) %>% 
+  select(locality, sample_id, trap, date_placed, date_emptied) %>% 
+  distinct()
+```
+
+
+
+Set weeks sampled manually for the few locations in Oslo that got an extra short sampling in the beginning.
+```{r sample_days_check}
+ggplot(dat, aes(x = weeks_sampled, y = days_collected, group = weeks_sampled)) +
+  geom_boxplot()
+
+```
+
+
+```{r}
+twoWeeks <- dat %>% 
+  filter(weeks_sampled == 4 &
+           days_collected < 20) %>% 
+  select(sample_id) %>% 
+  distinct() %>% 
+  as.vector()
+
+
+dat <- dat %>% 
+  mutate(weeks_sampled = ifelse(sample_id %in% twoWeeks[[1]], 2, weeks_sampled))
+
+
+```
+
+```{r}
+ggplot(dat, aes(x = weeks_sampled, y = days_collected, group = weeks_sampled)) +
+  geom_boxplot()
+
+```
+
+```{r}
+dat %>% 
+  filter(days_collected <1) %>% 
+  select(date_placed, date_emptied) %>% 
+  distinct()
+```
+
+
+
+Split up the sampling data and the observations.
+------------
+This is a bit ad-hoc now the first year, because we haven't set up the database in advance. In the future, the metadata will already be set up and not fed by the data from the metabarcoding.
+
+```{r} 
+metadata <- dat %>% 
+  select(sample,
+         GenlabID,
+         GUID,
+         mottatt_lab,
+         locality,
+         trap,
+         date_placed,
+         time_placed,
+         date_emptied,
+         time_emptied,
+         person_emptied,
+         liquid,
+         empty_week,
+         sample_id,
+         comment,
+         Tilsatt_antall_C.analis_SI_USA_08.06.20,
+         Tilsatt_antall_C.chinensis_08.06.20,
+         Tilsatt_antall_Sirisser,
+         Tilsatt_antall_Melormer,
+         Tilsatt_antall_C.maculatus,
+         Vekt_tom_flaske_.g.,
+         Vekt_flaske_med_EtOH_og_insekter_.g.,
+         Vekt_flaske_._insekter_vaat_.g.,
+         Vekt_flaske_._insekter_toerr_.g.,
+         Totalvolum_.mengde_ATL_._prot.K_mL.,
+         Vaatvekt_.g.,
+         Toerrvekt_.g.,
+         Kommentar_proeve,
+         Ekstraksjonsdato,
+         Ekstraksjonskit,
+         Subsamplet_volum_.ul.,
+         Elueringsvolum,
+         OD,
+         X260_280,
+         X260_230,
+         Labperson,
+         Ekstraksjonskommentar,
+         kommentar_genlab,
+         run,
+         trap_type,
+         habitat_type,
+         weeks_sampled,
+         days_collected) %>% 
+  distinct()
+
+
+```
+
+```{r}
+metadata %>% 
+  summarize(n_distinct(sample_id))
+
+metadata %>% 
+  summarize(n_distinct(sample))
+
+```
+
+```{r}
+obs_data <- dat %>% 
+  select(!c(GenlabID,
+         GUID,
+         mottatt_lab,
+         locality,
+         trap,
+         date_placed,
+         time_placed,
+         date_emptied,
+         time_emptied,
+         person_emptied,
+         liquid,
+         empty_week,
+         sample_id,
+         comment,
+         Tilsatt_antall_C.analis_SI_USA_08.06.20,
+         Tilsatt_antall_C.chinensis_08.06.20,
+         Tilsatt_antall_Sirisser,
+         Tilsatt_antall_Melormer,
+         Tilsatt_antall_C.maculatus,
+         Vekt_tom_flaske_.g.,
+         Vekt_flaske_med_EtOH_og_insekter_.g.,
+         Vekt_flaske_._insekter_vaat_.g.,
+         Vekt_flaske_._insekter_toerr_.g.,
+         Totalvolum_.mengde_ATL_._prot.K_mL.,
+         Vaatvekt_.g.,
+         Toerrvekt_.g.,
+         Kommentar_proeve,
+         Ekstraksjonsdato,
+         Ekstraksjonskit,
+         Subsamplet_volum_.ul.,
+         Elueringsvolum,
+         OD,
+         X260_280,
+         X260_230,
+         Labperson,
+         Ekstraksjonskommentar,
+         kommentar_genlab,
+         run,
+         trap_type,
+         habitat_type,
+         weeks_sampled,
+         days_collected)) 
+
+obs_data <- obs_data %>% 
+  select(sample,
+         kingdom,
+         phylum,
+         class,
+         order,
+         family,
+         genus,
+         species,
+         species_latin,
+         taxonomic_level,
+         identification_confidence,
+         possible_marker_issue,
+         probable_database_insufficiency,
+         norsk,
+         antall_arter_i_norge,
+         antall_norsk_arter_i_db,
+         pct_db_coverage,
+         value)
+
+```
+
+```{r}
+dbWriteTable(con,
+             Id(schema = "catch_data", table = "metabarcoding"),
+             obs_data,
+             overwrite = T)
+```
+
+```{r}
+metadata <- metadata %>% 
+  select(sample,
+         sample_id,
+         GenlabID,
+         GUID,
+         location = locality,
+         habitat_type,
+         trap_type,
+         liquid,
+         trap,
+         date_placed,
+         time_placed,
+         date_emptied,
+         time_emptied,
+         person_emptied,
+         empty_week,
+         weeks_sampled,
+         days_sampled = days_collected,
+         mottatt_lab,
+         Vekt_tom_flaske_.g.,
+         Vekt_flaske_med_EtOH_og_insekter_.g.,
+         Vekt_flaske_._insekter_vaat_.g.,
+         Vekt_flaske_._insekter_toerr_.g.,
+         Vaatvekt_.g.,
+         Toerrvekt_.g.,
+         Tilsatt_antall_C.analis_SI_USA_08.06.20,
+         Tilsatt_antall_C.chinensis_08.06.20,
+         Tilsatt_antall_Sirisser,
+         Tilsatt_antall_Melormer,
+         Tilsatt_antall_C.maculatus,
+         Ekstraksjonsdato,
+         Ekstraksjonskit,
+         Subsamplet_volum_.ul.,
+         Elueringsvolum,
+         Totalvolum_.mengde_ATL_._prot.K_mL.,
+         OD,
+         run,
+         X260_280,
+         X260_230,
+         Labperson,
+         Ekstraksjonskommentar,
+         kommentar_genlab,
+         Kommentar_proeve,
+         comment
+         )
+```
+
+```{r}
+dbWriteTable(con,
+             Id(schema = "catch_data", table = "sample_metadata"),
+             metadata,
+             overwrite = T)
+```
+
+```{r}
+
+add_uq <- "
+ALTER TABLE catch_data.sample_metadata
+ADD CONSTRAINT sample_uq
+UNIQUE(sample);
+"
+
+add_fk <- "
+ALTER TABLE catch_data.metabarcoding
+ADD CONSTRAINT sample_fk
+FOREIGN KEY(sample)
+REFERENCES catch_data.sample_metadata (sample)
+ON DELETE RESTRICT
+ON UPDATE CASCADE;
+
+"
+dbSendStatement(con, add_uq)
+dbSendStatement(con, add_fk)
+
+```
+
+This data contains no information of the intraspecific variation.
+```{r}
+genotype_check <- dat %>% 
+  group_by(sample) %>% 
+  summarize(no_species = n_distinct(species_latin),
+            no_rows = n()) %>%
+  mutate(diff = no_species - no_rows)
+              
+all(genotype_check$diff == 0)
+```
+
+Write an outline of the export view(s) to GBIF. Need to work out some details with Frode and Marie about ASV reporting to GBIF. 
+
+* ASVs as MD5 checksums?
+* Read amount for each ASV, plus total read abundance for entire sample?
+* How likely are we to use multiple PCRs of the same sample? Do we need a hierarchical level for the various identifications of the same sample? Perhaps good, to facilitate manual identification in future?
+
+
+Data structure plan for dissemination through GBIF
+============
+We aim to conform to the FAIR-principle as far as possible, for the storage and dissemination of our data. This means that the captured information should be stored at the highest granularity possible, and that the structure of the data should be retrievable. In practice, we shouldn't aggregate the data more than necessary, and we should incorporate the hierarchical structure of the data, e.g. the repeated measurements within a site, study period, trap and identification. 
+
+The structure of the data might change over time, given that we might have fewer number of traps per site, and only operate with a single sampling scheme at each site etc. But in principle, this could change in either direction in the future, so we better make room for this information. These levels of sampling seems to be relevant:
+
+1. year_location_event.
+  - This should be defined as the entire 500x500 square since the trap locations might differ or change
+  - The location should be given a UUID as well as a vernacular name, and be provided with a polygon geometry.
+  - This can also incorporate information on the habitat type.
+  - Associated environmental data can be joined to this unit, and linked to the sample square in a **"sample square event"** that spans the entire season. Not sure of how much of this to include in GBIF
+  - Dates are the start of the first sampling event and the end of the last sampling event.
+2. location_sampling_event
+  - This is unique for every sample square and collection period. Multiple traps with the same time period in the same location share the same trapping event.
+  - Temperature data can be linked to this.
+  - can be used to separate two collection period that share a start XOR end time.
+  - no geometry at this level
+3. sampling_trap_event
+  - Each trap within the same collection time and place gets their separate trap event.
+  - Include information about location as high definition GPS, trap type and storage medium.
+  - Individual traps are kept separate, if handled separately (not combined) in identification.
+4. Identification events.
+  - Include information about the identification process
+  - Could have multiple runs of the metabarcoding, or multiple identification methodologies for the same sampling trap event (manual vs. metabarcoding)
+  - Could include identification effort (total read abundance, scope of manual identification)
+5. Occurrences within identification events.
+  - Should include linnean taxonomy plus ASV, plus amount of reads for each record for metabarcoding, caste, sex etc.
+  
+6. Various tables of related "environmental" information that is linked to these respective levels (1-5).
+  
+Probably neater to have separate tables for each event hierarchy. So that these UUIDs get set once and for all, and views can refer to.
+
+
+Create sample square event view
+----------------
+
+First, set up a schema with foreign tables. Add ssb 500 grid. 
+
+```{r}
+
+create_foreign_schema <- "
+CREATE SCHEMA IF NOT EXISTS foreign_tables
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+dbSendStatement(con, create_foreign_schema)
+
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA foreign_tables
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA foreign_tables
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA foreign_tables
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+
+")
+
+set_up_foreign_server <- "
+CREATE SERVER \"gisdata-db\"
+FOREIGN DATA WRAPPER postgres_fdw
+OPTIONS (host 'gisdata-db.nina.no', port '5432', dbname 'gisdata', use_remote_estimate 'true')
+"
+
+alt_owner_fs <- "
+ALTER SERVER \"gisdata-db\"
+    OWNER TO ag_pgsql_radardata_admin;
+
+"
+set_mapping_fs <- "
+CREATE USER MAPPING FOR \"jens.astrom\" SERVER \"gisdata-db\"
+    OPTIONS (password 'gjestpost', \"user\" 'postgjest');
+"
+
+dbSendStatement(con, set_up_foreign_server)
+dbSendStatement(con, alt_owner_fs)
+dbSendStatement(con, set_mapping_fs)
+
+
+create_foreign_tables_ssbid <-  "
+CREATE FOREIGN TABLE foreign_tables.ssb_500m(
+    ssbid bigint NOT NULL,
+    rsize integer,
+    \"row\" integer,
+    col integer,
+    xcoor integer,
+    ycoor integer,
+    geom geometry(MultiPolygon,25833)
+)
+    SERVER \"gisdata-db\"
+    OPTIONS (schema_name 'ssb_data_utm33n', table_name 'ssb_500m');"
+
+
+dbSendStatement(con, create_foreign_tables_ssbid)
+
+dbSendStatement(con, "
+GRANT ALL ON TABLE foreign_tables.ssb_500m TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+GRANT SELECT ON TABLE foreign_tables.ssb_500m TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+GRANT INSERT, SELECT, UPDATE ON TABLE foreign_tables.ssb_500m TO ag_pgsql_radardata_rw;
+")
+
+
+
+```
+
+
+```{r}
+create_view_schema <- "
+CREATE SCHEMA IF NOT EXISTS views
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_view_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA views
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA views
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA views
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+
+```
+
+
+```{r}
+create_lookup_schema <- "
+CREATE SCHEMA IF NOT EXISTS lookup
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_lookup_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA lookup
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA lookup
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA lookup
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+
+```
+
+
+
+```{r}
+create_event_schema <- "
+CREATE SCHEMA IF NOT EXISTS events
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_event_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA events
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA events
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA events
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+
+```
+
+
+
+
+Set up the sample square event view
+```{r}
+ 
+create_year_location_event_table <- "
+CREATE TABLE events.year_location (
+id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+ssbid bigint,
+ano_id text,
+location text,
+habitat_type text,
+year integer,
+start_date timestamptz,
+end_date timestamptz,
+geom geometry(polygon, 25833)
+
+)
+"
+
+dbSendStatement(con,
+                create_year_location_event_table)
+
+insert_year_location_data <- "
+INSERT INTO events.year_location (
+SELECT  l.id, l.ssbid, l.ano_flate_id as ano_id, l.location, l.habitat_type, l.year, min(date_placed) as start_date, max(date_emptied) as end_date, ST_GeometryN(s.geom, 1) as geom
+FROM catch_data.sample_metadata sm LEFT JOIN
+locations.locations l on 
+(sm.location = l.location AND l.year = date_part('year', sm.date_placed))
+LEFT JOIN
+foreign_tablesssb_500m s
+ON l.ssbid = s.ssbid
+GROUP BY l.id, l.year, s.geom
+ORDER BY l.year, l.location)
+"
+
+dbSendStatement(con,
+                insert_year_location_data)
+```
+
+Set up names
+
+```{r}
+create_people_schema <- "
+CREATE SCHEMA IF NOT EXISTS people
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_people_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA people
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA people
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA people
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+```
+
+```{r}
+create_names <- "
+CREATE TABLE lookup.names (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+full_name text NOT NULL,
+abbrev text NOT NULL,
+organisation text,
+telephone text,
+email text,
+comment text,
+CONSTRAINT names_uq UNIQUE(abbrev),
+CONSTRAINT abbrev_uq UNIQUE(full_name)
+)
+"
+dbSendStatement(con, "DROP TABLE IF EXISTS lookup.names")
+dbSendStatement(con, create_names)
+
+dbSendStatement(con, "INSERT INTO lookup.names SELECT * FROM people.names")
+
+```
+
+
+
+
+
+Set up location_sampling
+
+
+```{r}
+
+create_location_sampling_event_table <- "
+CREATE TABLE events.location_sampling (
+id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+year_location_id UUID NOT NULL,
+start_date timestamptz,
+end_date timestamptz,
+started_by text,
+ended_by text,
+comment text,
+CONSTRAINT year_location_fk 
+FOREIGN KEY (year_location_id) REFERENCES events.year_location(id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE,
+CONSTRAINT started_name_fk 
+FOREIGN KEY (started_by) REFERENCES lookup.names(abbrev)
+ON DELETE RESTRICT
+ON UPDATE CASCADE,
+CONSTRAINT ended_by_fk
+FOREIGN KEY (ended_by) REFERENCES lookup.names(abbrev)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+)
+"
+
+dbSendStatement(con, "DROP TABLE IF EXISTS events.location_sampling CASCADE")
+
+
+dbSendStatement(con,
+                create_location_sampling_event_table)
+
+```
+
+
+```{r}
+create_traps_schema <- "
+CREATE SCHEMA IF NOT EXISTS traps
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_traps_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA traps
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA traps
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA traps
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+```
+
+
+
+```{r}
+
+create_trap_types <- "
+CREATE TABLE lookup.trap_types (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+trap_model text NOT NULL UNIQUE,
+trap_type text NOT NULL,
+trap_color text NOT NULL,
+trap_manufacturer text NOT NULL
+)
+"
+dbSendStatement(con, "DROP TABLE IF EXISTS lookup.trap_types CASCADE")
+dbSendStatement(con, create_trap_types)
+```
+
+```{r}
+create_liquid <- "
+CREATE TABLE lookup.liquid (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+liquid_name text NOT NULL UNIQUE,
+liquid_composition TEXT NOT NULL
+)
+"
+dbSendStatement(con, "DROP TABLE IF EXISTS lookup.liquid")
+dbSendStatement(con, create_liquid)
+dbSendStatement(con, "COMMENT ON COLUMN lookup.liquid.liquid_name IS 'Short name';")
+dbSendStatement(con, "COMMENT ON COLUMN lookup.liquid.liquid_composition IS 'Full composition';")
+
+```
+
+
+
+```{r}
+create_trap_names <- "
+CREATE TABLE traps.trap_names (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+trap_name text NOT NULL,
+location text NOT NULL,
+year integer NOT NULL,
+trap_short_name text NOT NULL,
+trap_model text ,
+liquid_name text ,
+coordinate_precision_m bigint,
+elev_data boolean DEFAULT False,
+geom Geometry(PointZ, 25833),
+CONSTRAINT trap_model_fk 
+FOREIGN KEY(trap_model) REFERENCES lookup.trap_types(trap_model)
+ON DELETE RESTRICT
+ON UPDATE CASCADE,
+CONSTRAINT trap_liquid_fk 
+FOREIGN KEY(liquid_name) REFERENCES lookup.liquid(liquid_name)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+)
+"
+dbSendStatement(con, "DROP TABLE IF EXISTS traps.trap_names CASCADE")
+dbSendStatement(con, create_trap_names)
+```
+
+Populate trap names
+
+```{r}
+pop_trap_names <- "
+INSERT INTO traps.trap_names (trap_name, location, year, 
+							  trap_short_name, coordinate_precision_m,
+							 elev_data, geom)
+SELECT 'Ost_' || '2020_' || location || '_' || trap as trap_name,
+location, year, trap as trap_short_name, 
+CASE WHEN gps_type = 'high_precision' THEN 
+ 0.05 ELSE
+ 5 END as coordinate_precision_m,
+elev_data,
+geom
+FROM locations.trap_locations
+"
+dbExecute(con, pop_trap_names)
+
+fill_extra_trap_col1 <- "
+UPDATE traps.trap_names
+SET trap_model = 'Malaise_Watkins_Black'
+WHERE trap_short_name  LIKE 'MF%'
+"
+dbExecute(con, fill_extra_trap_col1) 
+ 
+fill_extra_trap_col2 <- "
+UPDATE traps.trap_names
+SET trap_model = 'Window_NMBU_2020'
+WHERE trap_short_name LIKE 'VF%'
+"
+dbExecute(con, fill_extra_trap_col2)  
+
+fill_extra_trap_col3 <- "
+UPDATE traps.trap_names
+SET liquid_name = 'EtOH85'
+WHERE trap_short_name LIKE 'MF%'
+"
+dbExecute(con, fill_extra_trap_col3)
+
+fill_extra_trap_col4 <- "
+UPDATE traps.trap_names
+SET liquid_name = 'PropGl70_EtOH85'
+WHERE trap_short_name LIKE 'VF%'
+"
+dbExecute(con, fill_extra_trap_col4)
+
+
+```
+
+
+  
+```{r}
+
+create_sampling_trap_event_table <- "
+CREATE TABLE events.sampling_trap (
+id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+genlab_GUID UUID,
+sample_id text,
+location_sampling_id UUID NOT NULL,
+trap_id UUID,
+comment_start text,
+comment_end text,
+gross_weight double precision,
+weight_empty_bottle double precision,
+wet_weight_bottle double precision,
+wet_weight double precision,
+dry_weight_bottle double precision,
+dry_weight double precision,
+added_number_melormer double precision,
+added_number_c_maculatus double precision,
+added_number_c_analis double precision,
+added_number_c_chinensis double precision,
+CONSTRAINT location_sampling_fk 
+FOREIGN KEY (location_sampling_id) REFERENCES events.location_sampling(id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE,
+CONSTRAINT trap_fk 
+FOREIGN KEY (trap_id) REFERENCES traps.trap_names(id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+)
+"
+dbSendStatement(con, "DROP TABLE IF EXISTS events.sampling_trap CASCADE")
+dbSendStatement(con,
+                create_sampling_trap_event_table)
+
+```
+
+4. Identification events.
+  - Include information about the identification process
+  - Could have multiple runs of the metabarcoding, or multiple identification methodologies for the same sampling trap event (manual vs. metabarcoding)
+  - Could include identification effort (total read abundance, scope of manual identification)
+
+
+```{r}
+
+create_id_techniques_table <- "
+CREATE TABLE lookup.identification_techniques (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+identification_name text UNIQUE,
+identification_type text NOT NULL,
+identification_details text
+)
+"
+
+dbSendStatement(con, "DROP TABLE IF EXISTS lookup.identification_techniques")
+dbSendStatement(con, create_id_techniques_table)
+
+```
+
+
+```{r}
+
+create_identification_event <- "
+CREATE TABLE events.identifications (
+id UUID PRIMARY KEY DEFAULT gen_random_UUID(),
+metabarcoding_id text,
+sampling_trap_id UUID,
+identification_name text NOT NULL,
+identification_comment text,
+read_abundance bigint,
+totalvolum_atl_prot_k_ml double precision,
+ekstraksjonsdato date,
+ekstraksjonskit text,
+ekstraksjonskommentar text,
+subsamplet_volum_ul double precision,
+elueringsvolum_ul double precision,
+od double precision,
+x260_280 double precision,
+x260_230 double precision,
+run text,
+lab_person text,
+kommentar_genlab text,
+CONSTRAINT sampling_trap_fk 
+FOREIGN KEY (sampling_trap_id) 
+REFERENCES events.sampling_trap(id)
+ON DELETE RESTRICT
+ON UPDATE CASCADE,
+CONSTRAINT identification_name_fk 
+FOREIGN KEY (identification_name) 
+REFERENCES lookup.identification_techniques(identification_name)
+ON DELETE RESTRICT
+ON UPDATE CASCADE
+)
+"
+
+dbExecute(con, "DROP TABLE IF EXISTS events.identifications")
+dbExecute(con, create_identification_event)
+
+```
+
+
+Now we can create the occurrence table.
+
+
+```{r}
+create_occurrences_schema <- "
+CREATE SCHEMA IF NOT EXISTS occurrences
+AUTHORIZATION ag_pgsql_radardata_admin;
+"
+
+dbSendStatement(con, create_occurrences_schema)
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA occurrences
+GRANT ALL ON TABLES TO ag_pgsql_radardata_admin;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA occurrences
+GRANT SELECT ON TABLES TO ag_pgsql_radardata_ro;
+")
+
+dbSendStatement(con, "
+ALTER DEFAULT PRIVILEGES IN SCHEMA occurrences
+GRANT INSERT, SELECT, UPDATE ON TABLES TO ag_pgsql_radardata_rw;
+")
+```
+
+
+```{r}
+
+create_occ_table <- "
+CREATE TABLE occurrences.observations (
+id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+idenfication_id UUID,
+id_kingdom text,
+id_phylum text,
+id_class text,
+id_order text,
+id_family text,
+id_genus text,
+id_species text,
+species_latin text,
+taxonomic_level text,
+no_reads double precision,
+identification_conficence text,
+possible_marker_issue boolean,
+probable_database_insufficiency boolean,
+native boolean,
+no_species_in_norway integer,
+no_norwegian_species_in_database integer,
+pct_db_coverage double precision
+
+)"
+
+dbExecute(con, "DROP TABLE IF EXISTS occurrences.observations")
+dbExecute(con, create_occ_table)
+```
+
+
+Normalize the data and populate the tables
+===========
+
+This is a bit ugly, and need some manual fixing in the table. A one-off for this year.
+
+```{r}
+insert_location_sampling <- "
+INSERT INTO events.location_sampling  
+SELECT gen_random_uuid() as id, emptied.year_location_id, emptied.start_date, emptied.end_date, 
+started.ended_by as started_by, emptied.ended_by, emptied.comment
+FROM 
+(SELECT sm.location, l.id as year_location_id, date_placed as start_date, date_emptied as end_date,
+person_emptied as ended_by, comment
+FROM catch_data.sample_metadata sm LEFT JOIN
+locations.locations l on 
+(sm.location = l.location AND l.year = date_part('year', sm.date_placed)) 
+GROUP BY l.id, sm.location, date_placed, date_emptied, person_emptied, comment
+ORDER BY sm.location, date_placed, date_emptied) emptied 
+LEFT JOIN
+(SELECT l.id as year_location_id, date_emptied as end_date, 
+person_emptied as ended_by, comment
+FROM catch_data.sample_metadata sm LEFT JOIN
+locations.locations l on 
+(sm.location = l.location AND l.year = date_part('year', sm.date_placed)) 
+GROUP BY l.id, sm.location, date_emptied, person_emptied, comment
+) started
+ON (emptied.start_date = started.end_date
+	AND emptied.year_location_id = started.year_location_id)
+GROUP BY emptied.location, emptied.year_location_id, emptied.start_date, started.ended_by, emptied.ended_by, emptied.end_date, emptied.comment
+
+"
+```
+
+Populate sampling_trap
+```{r}
+pop_sampling_trap <- " 
+INSERT INTO events.sampling_trap
+SELECT DISTINCT ON(\"GUID\") 
+gen_random_uuid() as id,
+\"GUID\"::uuid as genlab_guid, 
+sample_id,
+foo.id as location_sampling_id,
+traps.id as trap_id,
+NULL AS comment_start,
+NULL as comment_end,
+\"Vekt_flaske_med_EtOH_og_insekter_.g.\" as gross_weight,
+\"Vekt_tom_flaske_.g.\" as weight_empty_bottle,
+\"Vekt_flaske_._insekter_vaat_.g.\" as wet_weight_bottle,
+\"Vaatvekt_.g.\" as wet_weight,
+\"Vekt_flaske_._insekter_toerr_.g.\" as dry_weight_bottle,
+\"Toerrvekt_.g.\" as dry_weight,
+\"Tilsatt_antall_Melormer\" as added_number_melormer,
+\"Tilsatt_antall_C.maculatus\" as added_number_c_maculatus,
+\"Tilsatt_antall_C.analis_SI_USA_08.06.20\" as added_number_c_analis,
+\"Tilsatt_antall_C.chinensis_08.06.20\" as added_number_c_chinensis
+FROM catch_data.sample_metadata sm LEFT JOIN
+traps.trap_names traps
+ON (sm.location = traps.location
+AND sm.trap = traps.trap_short_name),
+(SELECT ls.*, yl.location 
+FROM events.location_sampling ls,
+ events.year_location yl
+ WHERE ls.year_location_id = yl.id) foo
+WHERE sm.location = foo.location
+AND sm.date_placed = foo.start_date
+AND sm.date_emptied = foo.end_date
+"
+dbExecute(con, pop_sampling_trap)
+
+```
+
+Populate identification table
+
+```{r}
+pop_identification_table <- "
+INSERT INTO events.identifications
+SELECT distinct on("GenlabID")
+gen_random_uuid() as id,
+"GenlabID" as metabarcoding_id,
+st.id as sampling_trap_id,
+'metabarcoding_myseq' as identification_name,
+kommentar_genlab as idenfication_comment,
+NULL as read_abundance,
+"Totalvolum_.mengde_ATL_._prot.K_mL." as totalvolum_atl_prot_k_ml,
+"Ekstraksjonsdato" as ekstraksjonsdato,
+"Ekstraksjonskit" as ekstraksjonskit,
+"Ekstraksjonskommentar" as ekstraksjonskommentar,
+"Subsamplet_volum_.ul." subsamplet_volum_ul,
+"Elueringsvolum" as elueringsvolum_ul,
+"OD" as od,
+"X260_280" as x260_280,
+"X260_230" as x260_230,
+run,
+"Labperson" as lab_person,
+"kommentar_genlab" as kommentar_genlab
+FROM catch_data.sample_metadata sm,
+events.sampling_trap st
+WHERE sm."GUID"::uuid = st.genlab_guid
+"
+dbExecute(con, pop_identification_table)
+
+```
+
 
 
